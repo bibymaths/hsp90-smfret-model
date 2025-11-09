@@ -12,11 +12,15 @@ dependencies = [
     "matplotlib",
     "tqdm",
     "notebook",
+    "tables>=3.10.1",
 ]
 
 [tool.uv]
-dev = ["ipykernel"]
+dev-dependencies = ["ipykernel"]
 
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = []
