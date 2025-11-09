@@ -2,6 +2,9 @@ import pandas as pd
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
+import warnings
+
+warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
 
 # === Configuration ===
 data_dir = Path("data/Hugel_2025")   # adjust path
@@ -20,7 +23,7 @@ for path in sorted(data_dir.glob("*.tracks*")):
         store.close()
         print(f"   Keys in file: {keys}")
     except Exception as e:
-        print(f"   ❌ Could not open file: {e}")
+        print(f"   Could not open file: {e}")
         continue
 
     # Step 2 — try loading the most likely dataset
@@ -28,7 +31,7 @@ for path in sorted(data_dir.glob("*.tracks*")):
     try:
         df = pd.read_hdf(path, key=k)
     except Exception as e:
-        print(f"   ❌ Error reading {k}: {e}")
+        print(f"   Error reading {k}: {e}")
         continue
 
     # Step 3 — flatten multiindex columns
@@ -65,7 +68,7 @@ for path in sorted(data_dir.glob("*.tracks*")):
     fret_col = next((c for c in fret_candidates if c in df.columns), None)
 
     if fret_col is None:
-        print("   ⚠ No FRET column found (looked for: "
+        print("   No FRET column found (looked for: "
               f"{', '.join(fret_candidates)}). Skipping plot.\n")
         continue
 
@@ -74,7 +77,7 @@ for path in sorted(data_dir.glob("*.tracks*")):
         if "donor_frame" in df.columns:
             df["time_s"] = df["donor_frame"] * frame_interval
         else:
-            print("   ⚠ No donor_frame/time info found. Skipping plot.\n")
+            print("   No donor_frame/time info found. Skipping plot.\n")
             continue
 
     # Choose a representative particle: longest trajectory
@@ -98,3 +101,86 @@ for path in sorted(data_dir.glob("*.tracks*")):
     plt.title(f"{path.name} – {label}")
     plt.tight_layout()
     plt.show()
+
+
+export_dir = Path("data/timeseries")
+export_dir.mkdir(exist_ok=True)
+
+frame_interval = 0.05  # seconds per frame, adjust from paper
+
+for path in sorted(data_dir.glob("*.tracks*.h5")):
+    print(f"\n📤 Exporting per-particle time series from: {path.name}")
+    try:
+        df = pd.read_hdf(path, key="/tracks/Data")
+    except Exception as e:
+        print(f"   Could not read {path.name}: {e}")
+        continue
+
+    # flatten multi-index column names
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = ["_".join(filter(None, c)).strip() for c in df.columns]
+
+    # ensure required columns exist
+    needed_cols = {"donor_frame", "fret_particle"}
+    if not needed_cols.issubset(df.columns):
+        print(f"   Missing required columns, skipping.")
+        continue
+
+    # time column
+    df["time_s"] = df["donor_frame"] * frame_interval
+
+    # find FRET efficiency column
+    fret_candidates = ["fret_eff", "fret_eff_app"]
+    fret_col = next((c for c in fret_candidates if c in df.columns), None)
+    if fret_col is None:
+        print(f"   No FRET efficiency column found, skipping file.")
+        continue
+
+    # optional filtering
+    if "filter_manual" in df.columns:
+        df = df[df["filter_manual"] == 1]
+    # drop particles with very short trajectories (<20 frames)
+    lengths = df.groupby("fret_particle")["donor_frame"].nunique()
+    keep = lengths[lengths >= 20].index
+    df = df[df["fret_particle"].isin(keep)]
+
+    # group by particle and export
+    count = 0
+    for pid, traj in df.groupby("fret_particle"):
+        traj = traj.sort_values("donor_frame")
+        out = traj[["time_s", fret_col]].rename(columns={fret_col: "FRET"})
+        out.to_csv(export_dir / f"{path.stem}_particle_{int(pid):05d}.csv", index=False)
+        count += 1
+
+    print(f"   ✅ Exported {count} per-particle traces → {export_dir}/")
+
+combined_out = export_dir/ "combined_fret_matrix.csv"
+
+print("\n🧩 Building combined FRET matrix ...")
+
+# Read all per-particle CSVs
+csv_files = sorted(export_dir.glob("*.csv"))
+if not csv_files:
+    print("   No per-particle CSV files found, skipping matrix creation.")
+else:
+    # Determine the common time grid
+    first_df = pd.read_csv(csv_files[0])
+    time_grid = first_df["time_s"].values
+    combined = pd.DataFrame({"time_s": time_grid})
+
+    # For each trace, interpolate (if needed) onto the same grid
+    for i, f in enumerate(csv_files):
+        df = pd.read_csv(f)
+        if len(df) == 0:
+            continue
+
+        # Interpolate to match time_grid
+        interp = np.interp(time_grid, df["time_s"], df["FRET"], left=np.nan, right=np.nan)
+        col_name = Path(f).stem.replace(".tracks_particle_", "_p")
+        combined[col_name] = interp
+
+        if (i + 1) % 100 == 0:
+            print(f" Processed {i + 1} traces ...")
+
+    combined.to_csv(combined_out, index=False)
+    print(f"  Combined matrix saved → {combined_out}")
