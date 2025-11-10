@@ -1,311 +1,643 @@
-#%% md
-# # Dual cAMP–cGMP FRET Pipeline (Spectra → FRET → Simulation → Fit)
-# 
-# This notebook provides a **modular**, end-to-end pipeline to:
-# 1. Load fluorescent protein spectra (ECFP/EYFP/mApple)  
-# 2. Build a FRET forward model (donor excitation, bandpass detection)  
-# 3. Simulate dual messenger dynamics (cAMP/cGMP) with cross-talk  
-# 4. Convert messengers → FRET efficiencies (Hill sensors) → fluorescence channels  
-# 5. Add realistic noise and compute ratiometric signals  
-# 6. Fit model parameters (ODE subset **or** joint ODE + Hill) to ratio data  
-# 7. Plot fits vs data
-# 
-# **Swap in real data** where indicated, keeping the same fitting interface.
-# 
-#%%
-
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from dataclasses import dataclass
-from typing import Tuple, Dict
+from pathlib import Path
+from typing import Tuple, List
 from scipy.integrate import solve_ivp
-from scipy.optimize import least_squares
+from scipy.optimize import curve_fit
+import matplotlib.pyplot as plt
+import re
 
-# Matplotlib defaults: single-plot figures, no style/colors forced (good for reproducibility)
-plt.rcParams.update({
-    "figure.dpi": 300,
-    "axes.grid": True
-})
 
-#%% md
-# ## Parameter containers
-#%%
+# ----------------------------------------------------------------------
+# Extended Model: Three-state Hsp90 dynamics + bleaching
+# States: Open (O) <-> Intermediate (I) <-> Closed (C) -> Bleached (B)
+# ----------------------------------------------------------------------
 
 @dataclass
-class ODEParams:
-    kAC: float = 1.0
-    kGC: float = 1.0
-    kPDE_A: float = 0.8
-    kPDE_G: float = 0.6
-    alpha: float = 1.5
-    kleak_A: float = 0.05
-    kleak_G: float = 0.05
+class Hsp90Params3State:
+    """
+    Three-state conformational model with bleaching:
+      O <-> I <-> C, each can irreversibly bleach to B with rate k_B.
+
+    We explicitly track P_O, P_I, P_C; P_B = 1 - P_O - P_I - P_C.
+    FRET is from O, I, C; bleached B is assumed dark (E_bleach = 0).
+    """
+    # Conformational rates
+    k_OI: float  # Open -> Intermediate rate (1/s)
+    k_IO: float  # Intermediate -> Open rate (1/s)
+    k_IC: float  # Intermediate -> Closed rate (1/s)
+    k_CI: float  # Closed -> Intermediate rate (1/s)
+
+    # Bleaching rate (same from all fluorescent states)
+    k_B: float   # O,I,C -> B (1/s)
+
+    # FRET levels
+    E_open: float   # FRET in Open state
+    E_inter: float  # FRET in Intermediate state
+    E_closed: float # FRET in Closed state
+
+    # Initial probabilities (P_I0 = 1 - P_O0 - P_C0, P_B0 = 0)
+    P_O0: float  # Initial Open probability
+    P_C0: float  # Initial Closed probability
+
 
 @dataclass
-class SensorParams:
-    # Hill parameters for cAMP and cGMP sensors
-    E0_A: float = 0.15; Emax_A: float = 0.35; K_A: float = 0.5; n_A: float = 2.0
-    E0_G: float = 0.10; Emax_G: float = 0.25; K_G: float = 0.5; n_G: float = 2.0
+class Hsp90Fit3State:
+    """
+    Container for a full fit: kinetics + static subpopulation.
+    """
+    params: Hsp90Params3State
+    f_dyn: float       # fraction of molecules following the kinetic model
+    E_static: float    # FRET level of static subpopulation
 
-@dataclass
-class DetectionParams:
-    lambda_ex_D: float = 430.0
-    donor_em_center: float = 475.0; donor_em_width: float = 30.0
-    acceptor_em_center: float = 535.0; acceptor_em_width: float = 30.0
-    red_em_center: float = 600.0; red_em_width: float = 40.0
-    kD_A: float = 1.0; kA_A: float = 1.0
-    kD_G: float = 1.0; kA_G: float = 1.0
-    beta_Y: float = 0.05  # YFP direct excitation under donor-ex
-    beta_R: float = 0.02  # mApple direct excitation under donor-ex
-    bg: float = 0.02      # background offset
 
-#%% md
-# ## Spectra utilities
-#%%
+def rhs_hsp90_3state(t: float, y: np.ndarray, p: Hsp90Params3State) -> np.ndarray:
+    """
+    ODE for P_O, P_I, P_C in the presence of bleaching.
+    """
+    P_O, P_I, P_C = y
 
-def load_spectra(path: str) -> pd.DataFrame:
-    spec = pd.read_csv(path)
-    # try to ensure numeric for spectra columns
-    for c in spec.columns:
-        if c != "wavelength":
-            spec[c] = pd.to_numeric(spec[c], errors="coerce").fillna(0.0)
-    return spec
+    # dP_O/dt = -k_OI*P_O + k_IO*P_I - k_B*P_O
+    dP_O = -p.k_OI * P_O + p.k_IO * P_I - p.k_B * P_O
 
-def normalize(vec: np.ndarray) -> np.ndarray:
-    m = np.max(vec) if np.size(vec)>0 else 0.0
-    return vec/(m if m>0 else 1.0)
+    # dP_I/dt = k_OI*P_O - (k_IO + k_IC + k_B)*P_I + k_CI*P_C
+    dP_I = p.k_OI * P_O - (p.k_IO + p.k_IC + p.k_B) * P_I + p.k_CI * P_C
 
-def sample_at(wavelengths: np.ndarray, spectrum: np.ndarray, lam: float) -> float:
-    idx = np.argmin(np.abs(wavelengths - lam))
-    return float(spectrum[idx])
+    # dP_C/dt = k_IC*P_I - k_CI*P_C - k_B*P_C
+    dP_C = p.k_IC * P_I - p.k_CI * P_C - p.k_B * P_C
 
-def bandpass_integral(wavelengths: np.ndarray, spectrum: np.ndarray, center: float, width: float) -> float:
-    lo, hi = center - width/2, center + width/2
-    mask = (wavelengths >= lo) & (wavelengths <= hi)
-    if not np.any(mask): return 0.0
-    return float(np.trapezoid(spectrum[mask], wavelengths[mask]))
+    return np.array([dP_O, dP_I, dP_C], dtype=float)
 
-#%% md
-# ## Messenger ODE model
-#%%
 
-def pulses(t: float, on: float, off: float) -> float:
-    return 1.0 if (on <= t <= off) else 0.0
+def model_fret_3state(t_eval: np.ndarray, p: Hsp90Params3State) -> np.ndarray:
+    """
+    Dynamic part only: E_dyn(t) = E_O*P_O + E_I*P_I + E_C*P_C.
+    """
+    P_O0 = p.P_O0
+    P_C0 = p.P_C0
+    P_I0 = 1.0 - P_O0 - P_C0
+    # crude fix if guesses are pathological
+    if P_I0 < 0.0:
+        total = max(P_O0 + P_C0, 1e-9)
+        P_O0 = P_O0 / total * 0.999
+        P_C0 = P_C0 / total * 0.001
+        P_I0 = 1.0 - P_O0 - P_C0
 
-def rhs(t: float, y: Tuple[float,float], p: ODEParams) -> Tuple[float,float]:
-    A, G = y
-    uAC = pulses(t, 30, 120)   # AC stimulus
-    uGC = pulses(t, 60, 150)   # GC stimulus
-    dA = p.kAC*uAC - p.kPDE_A*(1 + p.alpha*G)*A - p.kleak_A*A
-    dG = p.kGC*uGC - p.kPDE_G*G - p.kleak_G*G
-    return [dA, dG]
+    y0 = [P_O0, P_I0, P_C0]
 
-def simulate_ode(t_eval: np.ndarray, p: ODEParams, y0=(0.0,0.0)) -> Tuple[np.ndarray,np.ndarray]:
-    sol = solve_ivp(lambda t, y: rhs(t, y, p), [t_eval.min(), t_eval.max()], y0, t_eval=t_eval)
-    return sol.y  # (2, T) array: rows are A, G
+    sol = solve_ivp(
+        fun=lambda t, y: rhs_hsp90_3state(t, y, p),
+        t_span=(t_eval.min(), t_eval.max()),
+        y0=y0,
+        t_eval=t_eval,
+        vectorized=False,
+        atol=1e-8,
+        rtol=1e-8,
+    )
 
-#%% md
-# ## Sensor (Hill) and FRET forward model
-#%%
+    if not sol.success:
+        return np.full_like(t_eval, np.nan, dtype=float)
 
-def hill_array(x: np.ndarray, E0: float, Emax: float, K: float, n: float) -> np.ndarray:
-    x = np.maximum(x, 0.0)
-    return E0 + Emax * (x**n) / (K**n + x**n + 1e-12)
+    P_O_t = sol.y[0]
+    P_I_t = sol.y[1]
+    P_C_t = sol.y[2]
 
-def compute_efficiencies(A: np.ndarray, G: np.ndarray, sp: SensorParams) -> Tuple[np.ndarray,np.ndarray]:
-    EA = hill_array(A, sp.E0_A, sp.Emax_A, sp.K_A, sp.n_A)
-    EG = hill_array(G, sp.E0_G, sp.Emax_G, sp.K_G, sp.n_G)
-    return EA, EG
+    E_t = (
+        p.E_open * P_O_t +
+        p.E_inter * P_I_t +
+        p.E_closed * P_C_t
+    )
+    return E_t
 
-def prepare_detection_constants(spec: pd.DataFrame, dp: DetectionParams) -> Dict[str, float]:
-    w = spec["wavelength"].values.astype(float)
-    get = lambda name: normalize(spec[name].values.astype(float))
-    ECFP_ex, ECFP_em = get("ECFP ex"), get("ECFP em")
-    EYFP_ex, EYFP_em = get("EYFP ex"), get("EYFP em")
-    mApple_ex, mApple_em = get("mApple ex"), get("mApple em")
 
-    Ex_D      = sample_at(w, ECFP_ex, dp.lambda_ex_D)
-    Ex_A_at_D = sample_at(w, EYFP_ex,  dp.lambda_ex_D)
-    Ex_R_at_D = sample_at(w, mApple_ex, dp.lambda_ex_D)
+def model_total_fret(t_eval: np.ndarray, fit: Hsp90Fit3State) -> np.ndarray:
+    """
+    Full observation model: dynamic + static subpopulation.
 
-    Em_D_band = bandpass_integral(w, ECFP_em, dp.donor_em_center, dp.donor_em_width)
-    Em_A_band = bandpass_integral(w, EYFP_em,  dp.acceptor_em_center, dp.acceptor_em_width)
-    Em_R_band = bandpass_integral(w, mApple_em, dp.red_em_center, dp.red_em_width)
+        E_total(t) = f_dyn * E_dyn(t) + (1 - f_dyn) * E_static
+    """
+    E_dyn = model_fret_3state(t_eval, fit.params)
+    return fit.f_dyn * E_dyn + (1.0 - fit.f_dyn) * fit.E_static
 
-    return dict(Ex_D=Ex_D, Ex_A_at_D=Ex_A_at_D, Ex_R_at_D=Ex_R_at_D,
-                Em_D_band=Em_D_band, Em_A_band=Em_A_band, Em_R_band=Em_R_band)
 
-def forward_fret(EA: np.ndarray, EG: np.ndarray, const: Dict[str,float], dp: DetectionParams):
-    Ex_D, Ex_A_at_D, Ex_R_at_D = const["Ex_D"], const["Ex_A_at_D"], const["Ex_R_at_D"]
-    Em_D_band, Em_A_band, Em_R_band = const["Em_D_band"], const["Em_A_band"], const["Em_R_band"]
+# ----------------------------------------------------------------------
+# Data loading
+# ----------------------------------------------------------------------
 
-    F_A_DD = dp.kD_A * ((1 - EA) * Ex_D * Em_D_band) + dp.bg
-    F_A_DA = dp.kA_A * (EA * Ex_D * Em_A_band + dp.beta_Y * Ex_A_at_D * Em_A_band) + dp.bg
+def load_combined_matrix(path: Path) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+    df = pd.read_csv(path)
+    if "time_s" not in df.columns:
+        raise ValueError("Expected a 'time_s' column in the combined matrix.")
 
-    F_G_DD = dp.kD_G * ((1 - EG) * Ex_D * Em_D_band) + dp.bg
-    F_G_DA = dp.kA_G * (EG * Ex_D * Em_R_band + dp.beta_R * Ex_R_at_D * Em_R_band) + dp.bg
+    t = df["time_s"].values
+    traj_cols = [c for c in df.columns if c != "time_s"]
+    E_mat = df[traj_cols].to_numpy()
 
-    return F_A_DD, F_A_DA, F_G_DD, F_G_DA
+    row_valid = np.isfinite(E_mat).any(axis=1)
+    t = t[row_valid]
+    E_mat = E_mat[row_valid, :]
 
-def add_noise(x: np.ndarray, rel: float=0.01, absn: float=0.003, seed: int=42) -> np.ndarray:
-    rng = np.random.default_rng(seed)
-    return x + rng.normal(0, rel*np.maximum(x,1e-6) + absn, size=x.shape)
+    return t, E_mat, traj_cols
 
-def ratios(F_A_DD, F_A_DA, F_G_DD, F_G_DA):
-    return F_A_DA/F_A_DD, F_G_DA/F_G_DD
 
-#%% md
-# ## Fitting utilities
-#%%
 
-def simulate_ratios_from_params(t_eval: np.ndarray, ode_p: ODEParams, sens_p: SensorParams,
-                                const: Dict[str,float], det_p: DetectionParams,
-                                y0=(0.0,0.0)) -> Tuple[np.ndarray,np.ndarray]:
-    A, G = simulate_ode(t_eval, ode_p, y0=y0)
-    EA, EG = compute_efficiencies(A, G, sens_p)
-    F_A_DD, F_A_DA, F_G_DD, F_G_DA = forward_fret(EA, EG, const, det_p)
-    return ratios(F_A_DD, F_A_DA, F_G_DD, F_G_DA)
+def parse_column_metadata(col_names: List[str]) -> pd.DataFrame:
+    """
+    Parse combined_fret_matrix trajectory column names into a metadata DataFrame.
 
-def fit_subset_ode_params(t_eval, R_A_obs, R_G_obs, ode_seed: ODEParams, sens_p: SensorParams,
-                          const, det_p: DetectionParams):
-    # Fit [kAC, kGC, alpha] keeping the rest fixed
-    fixed = dict(kPDE_A=ode_seed.kPDE_A, kPDE_G=ode_seed.kPDE_G, kleak_A=ode_seed.kleak_A, kleak_G=ode_seed.kleak_G)
-    def residuals(theta):
-        kAC, kGC, alpha = theta
-        ode_try = ODEParams(kAC=kAC, kGC=kGC, alpha=alpha, **fixed)
-        RA, RG = simulate_ratios_from_params(t_eval, ode_try, sens_p, const, det_p)
-        return np.concatenate([RA - R_A_obs, RG - R_G_obs])
-    x0 = np.array([ode_seed.kAC, ode_seed.kGC, ode_seed.alpha])
-    bnds = (np.zeros_like(x0), np.ones_like(x0)*5.0)
-    res = least_squares(residuals, x0, bounds=bnds, xtol=1e-8, ftol=1e-8)
-    return res.x, res
+    Expected format (from your export code):
+        <construct>_<exp_id>_p<particle>
+    e.g. "Hsp90_409_601_241107_p00001"
 
-def fit_joint_ode_hill(t_eval, R_A_obs, R_G_obs, ode_seed: ODEParams, sens_seed: SensorParams, const, det_p: DetectionParams):
-    # theta = [kAC, kGC, alpha, E0_A, Emax_A, K_A, n_A, E0_G, Emax_G, K_G, n_G]
-    def pack(ode_p: ODEParams, s: SensorParams):
-        return np.array([ode_p.kAC, ode_p.kGC, ode_p.alpha,
-                         s.E0_A, s.Emax_A, s.K_A, s.n_A, s.E0_G, s.Emax_G, s.K_G, s.n_G], dtype=float)
-    def unpack(theta):
-        kAC, kGC, alpha, E0A, EmaxA, KA, nA, E0G, EmaxG, KG, nG = theta
-        ode = ODEParams(kAC=kAC, kGC=kGC, alpha=alpha,
-                        kPDE_A=ode_seed.kPDE_A, kPDE_G=ode_seed.kPDE_G,
-                        kleak_A=ode_seed.kleak_A, kleak_G=ode_seed.kleak_G)
-        sens = SensorParams(E0_A=E0A, Emax_A=EmaxA, K_A=KA, n_A=nA,
-                            E0_G=E0G, Emax_G=EmaxG, K_G=KG, n_G=nG)
-        return ode, sens
+    Returns
+    -------
+    meta : DataFrame with columns:
+        - col: original column name
+        - construct: e.g. "Hsp90_409_601" or "esDNA"
+        - exp_id: e.g. "241107"
+        - particle: string/ID after 'p'
+        - condition: default grouping key "<construct>_<exp_id>"
+    """
+    records = []
+    for c in col_names:
+        if c == "time_s":
+            continue
 
-    theta0 = pack(ode_seed, sens_seed)
-    lb = np.array([0,0,0, 0,0,1e-3,1.0, 0,0,1e-3,1.0], dtype=float)
-    ub = np.array([5,5,5, 0.6,0.8,5.0,4.0, 0.6,0.8,5.0,4.0], dtype=float)
+        # Split from the right: [..., construct, exp_id, pXXXXX]
+        parts = c.split("_")
+        if len(parts) < 3:
+            # Fallback: treat whole name as "construct"
+            construct = c
+            exp_id = "unknown"
+            particle = "unknown"
+        else:
+            particle = parts[-1]              # e.g. "p00001"
+            exp_id = parts[-2]                # e.g. "241107"
+            construct = "_".join(parts[:-2])  # e.g. "Hsp90_409_601" or "esDNA"
 
-    def residuals(theta):
-        ode_try, sens_try = unpack(theta)
-        RA, RG = simulate_ratios_from_params(t_eval, ode_try, sens_try, const, det_p)
-        return np.concatenate([RA - R_A_obs, RG - R_G_obs])
+        condition = f"{construct}_{exp_id}"
+        records.append((c, construct, exp_id, particle, condition))
 
-    res = least_squares(residuals, theta0, bounds=(lb,ub), xtol=1e-8, ftol=1e-8)
-    ode_hat, sens_hat = unpack(res.x)
-    return (ode_hat, sens_hat), res
+    meta = pd.DataFrame(
+        records,
+        columns=["col", "construct", "exp_id", "particle", "condition"]
+    )
+    return meta
 
-#%% md
-# ## Plotting utilities
-#%%
+def subset_matrix_by_columns(
+    t: np.ndarray,
+    E_mat: np.ndarray,
+    all_cols: List[str],
+    cols_subset: List[str]
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Given the full time grid and matrix, extract a sub-matrix restricted to
+    a subset of trajectory columns, and remove rows where all subset entries are NaN.
 
-def plot_messengers(t, A, G, title="Underlying messengers"):
-    plt.figure()
-    plt.plot(t, A, label="cAMP")
-    plt.plot(t, G, label="cGMP")
-    plt.xlabel("time"); plt.ylabel("concentration-like")
-    plt.title(title); plt.legend(); plt.show()
+    Parameters
+    ----------
+    t : (T,) array
+        Full time grid.
+    E_mat : (T, N) array
+        FRET trajectories for all columns in all_cols.
+    all_cols : list of str
+        Names of all trajectory columns (corresponding to E_mat columns).
+    cols_subset : list of str
+        Names of columns to keep for this subset.
 
-def plot_ratios_vs_fit(t, RA_obs, RG_obs, RA_fit, RG_fit):
-    plt.figure()
-    plt.plot(t, RA_obs, 'o', ms=2, alpha=0.6, label="R_A observed")
-    plt.plot(t, RA_fit, '-', lw=2, label="R_A fit")
-    plt.xlabel("time"); plt.ylabel("FRET ratio (cAMP sensor)")
-    plt.title("cAMP FRET ratio: data vs fit")
-    plt.legend(); plt.show()
+    Returns
+    -------
+    t_sub : (T_sub,) array
+        Time grid for which at least one trajectory in the subset is finite.
+    E_sub : (T_sub, N_sub) array
+        Subset FRET matrix.
+    """
+    name_to_idx = {c: i for i, c in enumerate(all_cols)}
+    idx = [name_to_idx[c] for c in cols_subset if c in name_to_idx]
 
-    plt.figure()
-    plt.plot(t, RG_obs, 'o', ms=2, alpha=0.6, label="R_G observed")
-    plt.plot(t, RG_fit, '-', lw=2, label="R_G fit")
-    plt.xlabel("time"); plt.ylabel("FRET ratio (cGMP sensor)")
-    plt.title("cGMP FRET ratio: data vs fit")
-    plt.legend(); plt.show()
+    if not idx:
+        raise ValueError("No matching columns found for subset.")
 
-#%% md
-# ## Demo: simulate synthetic ratios, fit parameters, and plot
-#%%
+    E_sub_full = E_mat[:, idx]
+    row_valid = np.isfinite(E_sub_full).any(axis=1)
+    t_sub = t[row_valid]
+    E_sub = E_sub_full[row_valid, :]
+    return t_sub, E_sub
 
-# Load spectra from the uploaded file
-spec_path = "data/fpbase_spectra.csv"
-spec = load_spectra(spec_path)
 
-# Prepare constants
-det_p = DetectionParams()
-const = prepare_detection_constants(spec, det_p)
+def compute_ensemble_metrics(
+    t: np.ndarray,
+    E_mat: np.ndarray,
+    fit: Hsp90Fit3State
+) -> dict:
+    """
+    Compute ensemble RMSE and R^2 for a given condition and fitted model.
+    Uses ensemble mean vs model prediction (same logic as plot_ensemble_fit).
+    """
+    row_valid = np.isfinite(E_mat).any(axis=1)
+    t_plot = t[row_valid]
+    E_plot = E_mat[row_valid, :]
 
-# Truth for simulation
-ode_true = ODEParams(kAC=1.0, kGC=1.0, kPDE_A=0.8, kPDE_G=0.6, alpha=1.5, kleak_A=0.05, kleak_G=0.05)
-sens_true = SensorParams(E0_A=0.15, Emax_A=0.35, K_A=0.5, n_A=2.0,
-                         E0_G=0.10, Emax_G=0.25, K_G=0.5, n_G=2.0)
+    if t_plot.size == 0:
+        return dict(rmse=np.nan, r2=np.nan, n_time=0, n_traj=0)
 
-# Simulate and create noisy ratio observations
-t_eval = np.linspace(0, 200, 2001)
-A, G = simulate_ode(t_eval, ode_true, y0=(0.0,0.0))
-EA, EG = compute_efficiencies(A, G, sens_true)
-F_A_DD, F_A_DA, F_G_DD, F_G_DA = forward_fret(EA, EG, const, det_p)
+    E_mean = np.nanmean(E_plot, axis=1)
+    E_model = model_total_fret(t_plot, fit)
 
-F_A_DD_obs = add_noise(F_A_DD, seed=1)
-F_A_DA_obs = add_noise(F_A_DA, seed=2)
-F_G_DD_obs = add_noise(F_G_DD, seed=3)
-F_G_DA_obs = add_noise(F_G_DA, seed=4)
-R_A_obs, R_G_obs = ratios(F_A_DD_obs, F_A_DA_obs, F_G_DD_obs, F_G_DA_obs)
+    mask = np.isfinite(E_mean) & np.isfinite(E_model)
+    E_obs = E_mean[mask]
+    E_mod = E_model[mask]
 
-# Plot messengers (truth)
-plot_messengers(t_eval, A, G, title="Underlying messengers (simulated truth)")
+    if E_obs.size == 0:
+        return dict(rmse=np.nan, r2=np.nan, n_time=0, n_traj=E_plot.shape[1])
 
-# --- Subset ODE fit ---
-ode_seed = ODEParams(kAC=0.8, kGC=0.8, kPDE_A=0.8, kPDE_G=0.6, alpha=1.0, kleak_A=0.05, kleak_G=0.05)
-subset_params, subset_res = fit_subset_ode_params(t_eval, R_A_obs, R_G_obs, ode_seed, sens_true, const, det_p)
-ode_subset = ODEParams(kAC=subset_params[0], kGC=subset_params[1], alpha=subset_params[2],
-                       kPDE_A=ode_seed.kPDE_A, kPDE_G=ode_seed.kPDE_G, kleak_A=ode_seed.kleak_A, kleak_G=ode_seed.kleak_G)
+    residuals = E_obs - E_mod
+    rmse = np.sqrt(np.mean(residuals**2))
+    ss_res = np.sum(residuals**2)
+    ss_tot = np.sum((E_obs - E_obs.mean())**2)
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
 
-RA_fit_subset, RG_fit_subset = simulate_ratios_from_params(t_eval, ode_subset, sens_true, const, det_p)
-plot_ratios_vs_fit(t_eval, R_A_obs, R_G_obs, RA_fit_subset, RG_fit_subset)
+    return dict(
+        rmse=float(rmse),
+        r2=float(r2),
+        n_time=int(len(E_obs)),
+        n_traj=int(E_mat.shape[1]),
+    )
 
-print("Subset ODE fit [kAC, kGC, alpha]:", subset_params)
 
-# --- Joint ODE + Hill fit ---
-sens_seed = SensorParams(E0_A=0.10, Emax_A=0.30, K_A=0.7, n_A=2.0,
-                         E0_G=0.08, Emax_G=0.20, K_G=0.7, n_G=2.0)
+def fit_all_conditions(
+    t: np.ndarray,
+    E_mat: np.ndarray,
+    col_names: List[str],
+    group_by: str = "condition",
+    do_plots: bool = False,
+    max_overlay_traces: int = 100,
+) -> Tuple[pd.DataFrame, dict]:
+    """
+    Fit the 3-state+bleaching+static model separately for each condition.
 
-(ode_hat, sens_hat), res_joint = fit_joint_ode_hill(t_eval, R_A_obs, R_G_obs, ode_seed, sens_seed, const, det_p)
-RA_fit_joint, RG_fit_joint = simulate_ratios_from_params(t_eval, ode_hat, sens_hat, const, det_p)
-plot_ratios_vs_fit(t_eval, R_A_obs, R_G_obs, RA_fit_joint, RG_fit_joint)
+    Parameters
+    ----------
+    t : (T,) array
+        Global time grid.
+    E_mat : (T, N) array
+        Full combined FRET matrix.
+    col_names : list of str
+        Names of trajectory columns (same order as E_mat columns).
+    group_by : {"condition", "construct", "exp_id"}
+        How to group trajectories:
+        - "condition": construct+exp_id (default, per coverslip/day)
+        - "construct": pool all days for each construct
+        - "exp_id": per date across constructs (usually less useful)
+    do_plots : bool
+        If True, make per-condition time plots using plot_hsp90_fit_time.
+    max_overlay_traces : int
+        Maximum number of individual trajectories to overlay per condition.
 
-print("Joint ODE+Hill fit:")
-print(ode_hat)
-print(sens_hat)
+    Returns
+    -------
+    summary_df : DataFrame
+        One row per condition with fitted parameters and metrics.
+    fits : dict
+        Mapping: condition_key -> Hsp90Fit3State
+    """
+    meta = parse_column_metadata(col_names)
+    if group_by not in meta.columns:
+        raise ValueError(f"group_by must be one of {', '.join(['condition','construct','exp_id'])}")
 
-#%% md
-# ## Hook for real ratio data
-# 
-# To fit **real** dual-FRET ratio time series, place a CSV with columns like:
-# ```
-# time_s, R_A, R_G
-# 0.0, 1.02, 0.98
-# 0.1, 1.03, 0.98
-# ...
-# ```
-# Then replace the synthetic `R_A_obs, R_G_obs` with data-loaded arrays, and call the same fit functions.
-# 
-#%%
+    group_keys = sorted(meta[group_by].unique())
+    fits = []
+    fit_dict = {}
 
-# Example loader (uncomment and adapt column names):
-# df = pd.read_csv("my_real_dual_fret_ratios.csv")
-# t_eval = df["time_s"].values
-# R_A_obs = df["R_A"].values
-# R_G_obs = df["R_G"].values
-# # Then reuse: subset or joint fit methods from above.
+    for key in group_keys:
+        cols_subset = meta.loc[meta[group_by] == key, "col"].tolist()
+        if not cols_subset:
+            continue
+
+        print(f"\nFitting group '{group_by} = {key}' with {len(cols_subset)} trajectories...")
+        try:
+            t_sub, E_sub = subset_matrix_by_columns(t, E_mat, col_names, cols_subset)
+        except ValueError as e:
+            print(f"  Skipping {key}: {e}")
+            continue
+
+        # Fit model to this condition’s ensemble mean
+        fit = fit_global_3state(t_sub, E_sub)
+        fit_dict[key] = fit
+
+        # Compute goodness-of-fit metrics
+        metrics = compute_ensemble_metrics(t_sub, E_sub, fit)
+
+        # Flatten parameters into a record
+        p = fit.params
+        rec = dict(
+            group_by=group_by,
+            group_key=key,
+            n_traj=metrics["n_traj"],
+            n_time=metrics["n_time"],
+            rmse=metrics["rmse"],
+            r2=metrics["r2"],
+            k_OI=p.k_OI,
+            k_IO=p.k_IO,
+            k_IC=p.k_IC,
+            k_CI=p.k_CI,
+            k_B=p.k_B,
+            E_open=p.E_open,
+            E_inter=p.E_inter,
+            E_closed=p.E_closed,
+            P_O0=p.P_O0,
+            P_C0=p.P_C0,
+            f_dyn=fit.f_dyn,
+            E_static=fit.E_static,
+        )
+        fits.append(rec)
+
+        # Optional per-condition time plot
+        if do_plots:
+            print(f"  Plotting time-course for {key}...")
+            plot_hsp90_fit_time(
+                t_sub,
+                E_sub,
+                fit,
+                n_traces_overlay=max_overlay_traces,
+                random_seed=0,
+            )
+
+    if not fits:
+        summary_df = pd.DataFrame(
+            columns=[
+                "group_by", "group_key", "n_traj", "n_time",
+                "rmse", "r2",
+                "k_OI", "k_IO", "k_IC", "k_CI", "k_B",
+                "E_open", "E_inter", "E_closed",
+                "P_O0", "P_C0",
+                "f_dyn", "E_static",
+            ]
+        )
+    else:
+        summary_df = pd.DataFrame(fits)
+
+    return summary_df, fit_dict
+
+# ----------------------------------------------------------------------
+# Global fitting using curve_fit (ensemble mean)
+# ----------------------------------------------------------------------
+
+def fit_global_3state(
+        t: np.ndarray,
+        E_mat: np.ndarray,
+        theta0: np.ndarray = None,
+) -> Hsp90Fit3State:
+    """
+    Fit the 3-state + bleaching model plus static fraction to the ensemble mean.
+    """
+    row_valid = np.isfinite(E_mat).any(axis=1)
+    t_fit = t[row_valid]
+    E_mean = np.nanmean(E_mat[row_valid, :], axis=1)
+
+    mask = np.isfinite(E_mean)
+    t_fit = t_fit[mask]
+    E_fit = E_mean[mask]
+
+    if t_fit.size == 0:
+        raise RuntimeError("No valid data for fitting.")
+
+    # theta = [k_OI, k_IO, k_IC, k_CI, k_B, E_o, E_i, E_c, P_O0, P_C0, f_dyn, E_static]
+    if theta0 is None:
+        theta0 = np.array([
+            0.01, 0.01, 0.01, 0.01,  # conformational rates
+            0.001,                   # bleaching rate
+            0.1, 0.3, 0.6,           # FRET levels
+            0.7, 0.2,                # P_O0, P_C0 (P_I0 = 0.1)
+            0.7, 0.18                # f_dyn, E_static
+        ], dtype=float)
+
+    lower = np.array([
+        0.0, 0.0, 0.0, 0.0,   # rates >= 0
+        0.0,                  # k_B >= 0
+        0.0, 0.0, 0.0,        # FRET levels >= 0
+        0.0, 0.0,             # P_O0, P_C0 >= 0
+        0.0, 0.0              # f_dyn, E_static in [0,1]
+    ], dtype=float)
+
+    upper = np.array([
+        10.0, 10.0, 10.0, 10.0,  # conformational rates
+        10.0,                    # k_B
+        1.0, 1.0, 1.0,           # FRET levels in [0,1]
+        1.0, 1.0,                # P_O0, P_C0 in [0,1]
+        1.0, 1.0                 # f_dyn, E_static in [0,1]
+    ], dtype=float)
+
+    def fret_wrapper_3s(t_in,
+                        k_oi, k_io, k_ic, k_ci, k_b,
+                        e_o, e_i, e_c,
+                        p_o0, p_c0,
+                        f_dyn, e_static):
+        params = Hsp90Params3State(
+            k_OI=k_oi, k_IO=k_io, k_IC=k_ic, k_CI=k_ci,
+            k_B=k_b,
+            E_open=e_o, E_inter=e_i, E_closed=e_c,
+            P_O0=p_o0, P_C0=p_c0
+        )
+        E_dyn = model_fret_3state(t_in, params)
+        return f_dyn * E_dyn + (1.0 - f_dyn) * e_static
+
+    popt, pcov = curve_fit(
+        fret_wrapper_3s,
+        t_fit,
+        E_fit,
+        p0=theta0,
+        bounds=(lower, upper),
+        maxfev=20000,
+    )
+
+    # Unpack fitted parameters
+    (k_oi, k_io, k_ic, k_ci, k_b,
+     e_o, e_i, e_c,
+     p_o0, p_c0,
+     f_dyn, e_static) = popt
+
+    params = Hsp90Params3State(
+        k_OI=float(k_oi),
+        k_IO=float(k_io),
+        k_IC=float(k_ic),
+        k_CI=float(k_ci),
+        k_B=float(k_b),
+        E_open=float(e_o),
+        E_inter=float(e_i),
+        E_closed=float(e_c),
+        P_O0=float(p_o0),
+        P_C0=float(p_c0),
+    )
+    return Hsp90Fit3State(params=params,
+                          f_dyn=float(f_dyn),
+                          E_static=float(e_static))
+
+
+# ----------------------------------------------------------------------
+# Diagnostics / plotting
+# ----------------------------------------------------------------------
+
+def plot_ensemble_fit(t: np.ndarray, E_mat: np.ndarray, fit: Hsp90Fit3State) -> None:
+    """
+    Goodness-of-fit plot based on ensemble-averaged FRET.
+    """
+    row_valid = np.isfinite(E_mat).any(axis=1)
+    t_plot = t[row_valid]
+    E_plot = E_mat[row_valid, :]
+
+    if t_plot.size == 0:
+        raise RuntimeError("No valid time points for ensemble fit plot.")
+
+    E_mean = np.nanmean(E_plot, axis=1)
+    E_std  = np.nanstd(E_plot, axis=1)
+
+    E_model = model_total_fret(t_plot, fit)
+
+    mask = np.isfinite(E_mean) & np.isfinite(E_model)
+    E_obs = E_mean[mask]
+    E_mod = E_model[mask]
+
+    if E_obs.size == 0:
+        raise RuntimeError("No valid (mean, model) pairs for goodness-of-fit plot.")
+
+    residuals = E_obs - E_mod
+    rmse = np.sqrt(np.mean(residuals**2))
+    ss_res = np.sum(residuals**2)
+    ss_tot = np.sum((E_obs - E_obs.mean())**2)
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
+
+    print(f"Ensemble RMSE (mean data - model): {rmse:.6f}")
+    print(f"Ensemble R^2: {r2:.6f}")
+
+    xmin = np.min(E_mod)
+    xmax = np.max(E_mod)
+    ymin = np.min(E_obs)
+    ymax = np.max(E_obs)
+    lo = min(xmin, ymin)
+    hi = max(xmax, ymax)
+
+    plt.figure(figsize=(6, 6))
+    plt.scatter(E_mod, E_obs, s=20, alpha=0.8, label="Time points (ensemble mean)")
+    plt.plot([lo, hi], [lo, hi], "k--", lw=1.5, label="y = x")
+
+    plt.xlabel("Model FRET (ensemble)")
+    plt.ylabel("Observed FRET (ensemble mean)")
+    plt.title(
+        "Goodness of fit (ensemble mean vs model)\n"
+        f"RMSE = {rmse:.4f}, R^2 = {r2:.4f}"
+    )
+    plt.xlim(lo, hi)
+    plt.ylim(lo, hi)
+    plt.gca().set_aspect("equal", adjustable="box")
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_hsp90_fit_time(
+    t: np.ndarray,
+    E_mat: np.ndarray,
+    fit: Hsp90Fit3State,
+    n_traces_overlay: int = 200,
+    random_seed: int = 0,
+) -> None:
+    """
+    Plot Hsp90 3-state + bleaching + static fraction vs data across time.
+    """
+    row_valid = np.isfinite(E_mat).any(axis=1)
+    t_plot = t[row_valid]
+    E_plot = E_mat[row_valid, :]
+
+    E_mean = np.nanmean(E_plot, axis=1)
+    E_std = np.nanstd(E_plot, axis=1)
+
+    E_model = model_total_fret(t_plot, fit)
+
+    n_traj_total = E_plot.shape[1]
+    if n_traces_overlay > 0 and n_traj_total > 0:
+        n_traces_overlay = min(n_traces_overlay, n_traj_total)
+        rng = np.random.default_rng(random_seed)
+        idx = rng.choice(n_traj_total, size=n_traces_overlay, replace=False)
+        E_subset = E_plot[:, idx]
+    else:
+        E_subset = None
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    if E_subset is not None:
+        for j in range(E_subset.shape[1]):
+            ax.plot(t_plot, E_subset[:, j], color="gray", alpha=0.05, lw=0.5)
+
+    ax.plot(t_plot, E_mean, color="tab:blue", lw=2, label="Data mean (all trajectories)")
+    ax.fill_between(
+        t_plot,
+        E_mean - E_std,
+        E_mean + E_std,
+        color="tab:blue",
+        alpha=0.2,
+        label="Data ±1 SD",
+    )
+
+    ax.plot(t_plot, E_model, color="tab:orange", lw=2, label="Model")
+
+    ax.set_xlabel("time (s)")
+    ax.set_ylabel("FRET")
+    ax.set_title(
+        f"Hsp90 global 3-state + bleaching + static fraction\n"
+        f"{E_plot.shape[1]} trajectories, {len(t_plot)} time points"
+    )
+    ax.legend(loc="best")
+    plt.tight_layout()
+    plt.show()
+
+
+# ----------------------------------------------------------------------
+# Main
+# ----------------------------------------------------------------------
+
+def main():
+    combined_path = Path("data/timeseries/combined_fret_matrix.csv")
+    t, E_mat, col_names = load_combined_matrix(combined_path)
+
+    print(f"Loaded combined matrix: {E_mat.shape[0]} time points, {E_mat.shape[1]} trajectories")
+
+    # Global fit (all trajectories pooled)
+    fit_hat = fit_global_3state(t, E_mat)
+    print("\nBest-fit parameters (global):")
+    print(fit_hat)
+
+    # Global diagnostics
+    plot_ensemble_fit(t, E_mat, fit_hat)
+    plot_hsp90_fit_time(t, E_mat, fit_hat, n_traces_overlay=200)
+
+    # Now: per-condition fits
+    # 1) Per coverslip/day (construct + exp_id)
+    print("\n=== Per-condition fits (construct + exp_id) ===")
+    summary_cond, fits_cond = fit_all_conditions(
+        t,
+        E_mat,
+        col_names,
+        group_by="condition",     # "<construct>_<exp_id>"
+        do_plots=True,           # set True if you want per-condition time plots
+        max_overlay_traces=100,
+    )
+    print("\nCondition-level summary:")
+    print(summary_cond.sort_values(["group_key"]))
+
+    # 2) Per construct (pooling all days), if you want
+    print("\n=== Per-construct fits (pool all exp_id for each construct) ===")
+    summary_constr, fits_constr = fit_all_conditions(
+        t,
+        E_mat,
+        col_names,
+        group_by="construct",
+        do_plots=False,
+        max_overlay_traces=100,
+    )
+    print("\nConstruct-level summary:")
+    print(summary_constr.sort_values(["group_key"]))
+
+if __name__ == "__main__":
+    main()
