@@ -6,8 +6,6 @@ from typing import Tuple, List
 from scipy.integrate import solve_ivp
 from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
-import re
-
 
 # ----------------------------------------------------------------------
 # Extended Model: Three-state Hsp90 dynamics + bleaching
@@ -92,8 +90,8 @@ def model_fret_3state(t_eval: np.ndarray, p: Hsp90Params3State) -> np.ndarray:
         y0=y0,
         t_eval=t_eval,
         vectorized=False,
-        atol=1e-8,
-        rtol=1e-8,
+        # atol=1e-8,
+        # rtol=1e-8,
     )
 
     if not sol.success:
@@ -592,6 +590,95 @@ def plot_hsp90_fit_time(
     plt.tight_layout()
     plt.show()
 
+def bootstrap_condition_params(
+    t: np.ndarray,
+    E_mat: np.ndarray,
+    col_names: list[str],
+    meta: pd.DataFrame,
+    group_key: str,
+    group_by: str = "condition",
+    n_boot: int = 100,
+    random_seed: int = 0,
+) -> pd.DataFrame:
+    """
+    Bootstrap parameter estimates for a single condition by resampling trajectories.
+
+    Returns a DataFrame with one row per bootstrap replicate and columns:
+    k_OI, k_IO, k_IC, k_CI, k_B, E_open, E_inter, E_closed, P_O0, P_C0, f_dyn, E_static
+    """
+    cols_subset = meta.loc[meta[group_by] == group_key, "col"].tolist()
+    if not cols_subset:
+        raise ValueError(f"No columns for {group_by}={group_key}")
+
+    # build submatrix for this condition
+    name_to_idx = {c: i for i, c in enumerate(col_names)}
+    idx_all = [name_to_idx[c] for c in cols_subset if c in name_to_idx]
+    E_full = E_mat[:, idx_all]
+
+    row_valid = np.isfinite(E_full).any(axis=1)
+    t_sub = t[row_valid]
+    E_sub = E_full[row_valid, :]
+
+    rng = np.random.default_rng(random_seed)
+    records = []
+
+    for b in range(n_boot):
+        # resample trajectories with replacement
+        idx_boot = rng.integers(0, E_sub.shape[1], size=E_sub.shape[1])
+        E_boot = E_sub[:, idx_boot]
+
+        try:
+            fit_b = fit_global_3state(t_sub, E_boot)
+        except Exception:
+            continue
+
+        p = fit_b.params
+        rec = dict(
+            k_OI=p.k_OI,
+            k_IO=p.k_IO,
+            k_IC=p.k_IC,
+            k_CI=p.k_CI,
+            k_B=p.k_B,
+            E_open=p.E_open,
+            E_inter=p.E_inter,
+            E_closed=p.E_closed,
+            P_O0=p.P_O0,
+            P_C0=p.P_C0,
+            f_dyn=fit_b.f_dyn,
+            E_static=fit_b.E_static,
+        )
+        records.append(rec)
+
+    return pd.DataFrame(records)
+
+def plot_param_vs_condition(summary_df, param):
+    plt.figure()
+    plt.plot(summary_df["group_key"], summary_df[param], "o-")
+    plt.xticks(rotation=90)
+    plt.ylabel(param)
+    plt.tight_layout()
+    plt.show()
+
+def summarize_bootstrap(boot_df, name):
+    vals = boot_df[name].values
+    mean = np.nanmean(vals)
+    lo, hi = np.nanpercentile(vals, [2.5, 97.5])
+    return mean, lo, hi
+
+
+def plot_bootstrap_compare(boot_A, boot_B, param, label_A, label_B):
+    A_vals = boot_A[param].values
+    B_vals = boot_B[param].values
+
+    plt.figure()
+    plt.hist(A_vals, bins=30, alpha=0.5, density=True, label=label_A)
+    plt.hist(B_vals, bins=30, alpha=0.5, density=True, label=label_B)
+    plt.xlabel(param)
+    plt.ylabel("density")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
 
 # ----------------------------------------------------------------------
 # Main
@@ -638,6 +725,28 @@ def main():
     )
     print("\nConstruct-level summary:")
     print(summary_constr.sort_values(["group_key"]))
+
+    plot_param_vs_condition(summary_cond, "k_OI")
+    plot_param_vs_condition(summary_cond, "f_dyn")
+    plot_param_vs_condition(summary_cond, "E_closed")
+
+    meta = parse_column_metadata(col_names)
+
+    cond_A = "Hsp90_409_601_241107"
+    cond_B = "Hsp90_409_601_241108"
+
+    boot_A = bootstrap_condition_params(t, E_mat, col_names, meta, cond_A, n_boot=200)
+    boot_B = bootstrap_condition_params(t, E_mat, col_names, meta, cond_B, n_boot=200)
+
+    for param in ["k_OI", "k_IC", "f_dyn", "E_closed"]:
+        mA, loA, hiA = summarize_bootstrap(boot_A, param)
+        mB, loB, hiB = summarize_bootstrap(boot_B, param)
+        print(param)
+        print(f"  cond A: mean={mA:.4f}, 95% CI [{loA:.4f}, {hiA:.4f}]")
+        print(f"  cond B: mean={mB:.4f}, 95% CI [{loB:.4f}, {hiB:.4f}]")
+        print()
+
+        plot_bootstrap_compare(boot_A, boot_B, param, cond_A, cond_B)
 
 if __name__ == "__main__":
     main()
