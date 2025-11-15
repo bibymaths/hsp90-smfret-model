@@ -283,6 +283,10 @@ for path in sorted(data_dir.glob("*.tracks*.h5")):
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = ["_".join(filter(None, c)).strip() for c in df.columns]
 
+    # --- NEW: restrict to donor excitation frames if available ---
+    if "fret_exc_type" in df.columns:
+        df = df[df["fret_exc_type"] == "d"]
+
     # ensure required columns
     needed_cols = {"donor_frame", "fret_particle"}
     if not needed_cols.issubset(df.columns):
@@ -297,8 +301,10 @@ for path in sorted(data_dir.glob("*.tracks*.h5")):
         logger.warning("No FRET efficiency column found, skipping file.")
         continue
 
+    # --- FIXED: manual filter semantics ---
+    # manual == 1 means "rejected" in the original GUI, so keep manual < 1
     if "filter_manual" in df.columns:
-        df = df[df["filter_manual"] == 1]
+        df = df[df["filter_manual"] < 1]
 
     # keep only finite, physically reasonable FRET values
     df = df[np.isfinite(df[fret_col])]
@@ -319,12 +325,16 @@ for path in sorted(data_dir.glob("*.tracks*.h5")):
 
     logger.info(f"Exported {count} per-particle traces to {export_dir}/")
 
-
 # === Combine all exported trajectories into a single matrix ===
 combined_out = export_dir / "fret_matrix.csv"
 logger.info("\nBuilding combined FRET matrix (uniform 0–max_t grid)...")
 
-csv_files = sorted(export_dir.glob("*.csv"))
+# Exclude the already combined matrix itself (important on reruns)
+csv_files = sorted(
+    f for f in export_dir.glob("*.csv")
+    if f.name != "fret_matrix.csv"
+)
+
 if not csv_files:
     logger.warning("No per-particle CSV files found, skipping matrix creation.")
 else:
