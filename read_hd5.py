@@ -321,7 +321,7 @@ for path in sorted(data_dir.glob("*.tracks*.h5")):
 
 
 # === Combine all exported trajectories into a single matrix ===
-combined_out = export_dir / "combined_fret_matrix.csv"
+combined_out = export_dir / "fret_matrix.csv"
 logger.info("\nBuilding combined FRET matrix (uniform 0–max_t grid)...")
 
 csv_files = sorted(export_dir.glob("*.csv"))
@@ -371,3 +371,12 @@ else:
     combined.to_csv(combined_out, index=False)
     logger.info(f"Combined matrix saved → {combined_out}")
     logger.info(f"Time points: {len(time_grid)}, trajectories: {combined.shape[1] - 1}")
+
+# === Cleanup: remove all per-particle CSVs except the combined matrix ===
+for f in export_dir.glob("*.csv"):
+    if f.name != "fret_matrix.csv":
+        try:
+            f.unlink()
+            logger.info(f"Deleted: {f.name}")
+        except Exception as e:
+            logger.error(f"Could not delete {f.name}: {e}")

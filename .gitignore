@@ -209,3 +209,5 @@ __marimo__/
 # User dirs
 plots/
 /data/
+*.lock
+

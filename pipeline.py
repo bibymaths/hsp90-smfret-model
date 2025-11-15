@@ -752,7 +752,7 @@ def plot_bootstrap_compare(boot_A, boot_B, param, label_A, label_B):
 # ----------------------------------------------------------------------
 
 def main():
-    combined_path = Path("data/timeseries/combined_fret_matrix.csv")
+    combined_path = Path("data/timeseries/fret_matrix.csv")
     t, E_mat, col_names = load_combined_matrix(combined_path)
 
     print(f"Loaded combined matrix: {E_mat.shape[0]} time points, {E_mat.shape[1]} trajectories")

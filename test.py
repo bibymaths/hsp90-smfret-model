@@ -638,7 +638,7 @@ def plot_bootstrap_compare(df_a: pd.DataFrame, df_b: pd.DataFrame, param: str, l
 # ----------------------------------------------------------------------
 
 def main():
-    data_path = Path("data/timeseries/combined_fret_matrix.csv")
+    data_path = Path("data/timeseries/fret_matrix.csv")
     if not data_path.exists():
         print(f"Data file not found at {data_path}")
         return
