@@ -1,5 +1,16 @@
-# toy-fret-model
-FRET simulation and fitting toolbox for single-molecule biophysics
+## License
+
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
+[![License: CC BY 4.0](https://img.shields.io/badge/License-CC--BY--4.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
+
+This repository is dual-licensed:
+
+- **Software code** → BSD-3-Clause  
+- **Figures, plots, visualizations** → CC-BY 4.0  
+
+See the [LICENSE](./LICENSE) file for complete details.
+
+# FRET simulation and fitting toolbox for single-molecule biophysics
 
 ### Understanding FRET datasets from Hugel et al., Biophysical Journal, 2025:
 

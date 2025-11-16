@@ -1,0 +1,14 @@
+This project includes two separate licensing regimes:
+
+1. Software (source code, algorithms, numerical models, analysis scripts)
+   is licensed under the BSD 3-Clause License.
+   SPDX-License-Identifier: BSD-3-Clause
+
+2. Figures (plots, diagrams, rendered visualizations, and documentation images)
+   are licensed under the Creative Commons Attribution 4.0 International License.
+   SPDX-License-Identifier: CC-BY-4.0
+
+© 2025 Abhinav Mishra. All rights reserved.
+
+This NOTICE file provides attribution information required by the BSD license
+and clarifies the dual-licensing structure of the repository.
