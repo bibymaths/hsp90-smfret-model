@@ -10,7 +10,7 @@ authors:
     orcid: "https://orcid.org/0009-0005-3179-7408"
 
 license: "BSD-3-Clause AND CC-BY-4.0"
-repository-code: "https://github.com/bibymaths/hsp90-smFRET-analysis-pipeline"
+repository-code: "https://github.com/bibymaths/hsp90-smFRET-model"
 keywords:
   - smFRET
   - Hsp90
@@ -29,7 +29,7 @@ preferred-citation:
   authors:
     - family-names: Mishra
       given-names: Abhinav
-  url: "https://github.com/<your-username>/<your-repo>"
+  url: "https://github.com/bibymaths/hsp90-smFRET-model"
   version: "1.0.0"
-  date-released: 2025-03-27
+  date-released: 2025-11-17
   license: "BSD-3-Clause AND CC-BY-4.0"
