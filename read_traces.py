@@ -59,8 +59,8 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
 data_dir = Path("data/Hugel_2025")   # adjust path
 key = "/tracks/Data"                 # default key
 frame_interval = 0.07  # seconds per frame (70 ms, as in Anandamurugan et al. 2026)
-fret_max = 0.9                         # max FRET efficiency to consider
-fret_min = 0.1                         # min FRET efficiency to consider
+fret_max = 1.0                         # max FRET efficiency to consider
+fret_min = 0                         # min FRET efficiency to consider
 USE_INTERPOLATION = False             # Set to False to disable cubic splines/filling
 
 def interpolate_trace(time_grid: np.ndarray,

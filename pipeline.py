@@ -151,7 +151,7 @@ def model_fret_3state(t_eval: np.ndarray, p: Hsp90Params3State) -> np.ndarray:
         t_span=(t_eval.min(), t_eval.max()),
         y0=y0,
         t_eval=t_eval,
-        vectorized=True,
+        vectorized=False,
         args=(k_params,),  # <--- CRITICAL FIX: Must be a tuple
         method='RK45'
     )
@@ -495,8 +495,8 @@ def fit_global_3state(
         theta0 = np.array([
             0.01, 0.01, 0.01, 0.01,  # conformational rates
             0.001,                   # bleaching rate
-            0.0, 0.0, 0.0,  # e0,d1,d2 (unconstrained init)
-            # 0.1, 0.3, 0.6,           # FRET levels
+            # 0.0, 0.0, 0.0,  # e0,d1,d2 (unconstrained init)
+            0.1, 0.3, 0.6,           # FRET levels
             0.35, 0.55,                # P_O0, P_C0 (P_I0 = 0.1)
             0.7, 0.18                # f_dyn, E_static
         ], dtype=float)
@@ -504,8 +504,8 @@ def fit_global_3state(
     lower = np.array([
         0.0, 0.0, 0.0, 1e-4,   # rates >= 0
         0.0,                  # k_B >= 0
-        -np.inf, -np.inf, -np.inf,  # FRET levels unbounded
-        # 0.0, 0.0, 0.0,        # FRET levels >= 0
+        # -np.inf, -np.inf, -np.inf,  # FRET levels unbounded
+        0.0, 0.0, 0.0,        # FRET levels >= 0
         0.0, 0.0,             # P_O0, P_C0 >= 0
         0.0, 0.0              # f_dyn, E_static in [0,1]
     ], dtype=float)
@@ -513,8 +513,8 @@ def fit_global_3state(
     upper = np.array([
         10.0, 10.0, 10.0, 10.0,  # conformational rates
         10.0,                    # k_B
-        np.inf, np.inf, np.inf,  # FRET levels unbounded
-        # 1.0, 1.0, 1.0,           # FRET levels in [0,1]
+        # np.inf, np.inf, np.inf,  # FRET levels unbounded
+        1.0, 1.0, 1.0,           # FRET levels in [0,1]
         1.0, 1.0,                # P_O0, P_C0 in [0,1]
         1.0, 0.8                 # f_dyn, E_static in [0,1]
     ], dtype=float)
