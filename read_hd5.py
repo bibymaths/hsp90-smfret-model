@@ -1,4 +1,4 @@
-'''
+"""
 BSD 3-Clause License
 
 Copyright (c) 2025, Abhinav Mishra
@@ -28,7 +28,7 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-'''
+"""
 
 """
 HDF5 FRET Tracking Data Processor
@@ -37,19 +37,6 @@ HDF5 FRET Tracking Data Processor
 This script processes single-molecule FRET tracking data stored in HDF5 format.
 It is designed to inspect raw data, filter and export individual particle
 trajectories, and combine them into a unified time-series matrix.
-
-The workflow consists of three main stages:
-1.  **Inspection**: Iterates through all track files, logging metadata,
-    data dimensions, and basic statistics. Plots a representative trajectory
-    for each file to aid in quick quality control.
-2.  **Export**: Reads raw data again, applies validity filters (FRET range,
-    minimum trajectory length), and saves each valid particle's trace as an
-    individual CSV file in a designated output directory.
-3.  **Combination**: Reads all exported individual CSVs, determines a global
-    time vector, and interpolates all traces onto this uniform grid using
-    cubic splines (or linear interpolation for short traces). The result is a
-    single matrix where columns represent individual molecules and rows represent
-    synchronized time points.
 """
 
 import logging
@@ -72,8 +59,8 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
 data_dir = Path("data/Hugel_2025")   # adjust path
 key = "/tracks/Data"                 # default key
 frame_interval = 0.1                # seconds per frame
-fret_max = 2                         # max FRET efficiency to consider
-fret_min = 0.16                         # min FRET efficiency to consider
+fret_max = 0.9                         # max FRET efficiency to consider
+fret_min = 0.1                         # min FRET efficiency to consider
 USE_INTERPOLATION = False             # Set to False to disable cubic splines/filling
 
 def interpolate_trace(time_grid: np.ndarray,
@@ -302,9 +289,12 @@ for path in sorted(data_dir.glob("*.tracks*.h5")):
         continue
 
     # --- FIXED: manual filter semantics ---
-    # manual == 1 means "rejected" in the original GUI, so keep manual < 1
+    # manual == 1 means "rejected" in the original GUI
     if "filter_manual" in df.columns:
-        df = df[df["filter_manual"] < 1]
+        df = df[df["filter_manual"] == 1]
+
+    if "fret_exec_type" in df.columns:
+        df = df[df["fret_exec_type"] == 1]
 
     # keep only finite, physically reasonable FRET values
     df = df[np.isfinite(df[fret_col])]
@@ -376,8 +366,10 @@ else:
         if (i + 1) % 100 == 0:
             logger.info(f"Processed {i + 1} traces ...")
 
-    # Build one DataFrame in a single allocation
+    # Build one DataFrame - time x trajectories
     combined = pd.DataFrame(columns)
+    # Filter for upto 100 seconds
+    combined = combined[combined["time_s"] <= 100.0]
     combined.to_csv(combined_out, index=False)
     logger.info(f"Combined matrix saved → {combined_out}")
     logger.info(f"Time points: {len(time_grid)}, trajectories: {combined.shape[1] - 1}")

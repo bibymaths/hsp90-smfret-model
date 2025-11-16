@@ -66,8 +66,10 @@ class Hsp90Params3State:
     k_IC: float  # Intermediate -> Closed rate (1/s)
     k_CI: float  # Closed -> Intermediate rate (1/s)
 
-    # Bleaching rate (same from all fluorescent states)
-    k_B: float   # O,I,C -> B (1/s)
+    # State-dependent bleaching
+    k_BO: float   # O -> B
+    k_BI: float   # I -> B
+    k_BC: float   # C -> B
 
     # FRET levels
     E_open: float   # FRET in Open state
@@ -97,35 +99,28 @@ def ordered_levels(e0, d1, d2):
     Ec = Ei + inc2
     return Eo, Ei, Ec
 
-def rhs_hsp90_3state(t: float, y: np.ndarray, p: Hsp90Params3State) -> np.ndarray:
-    """
-    ODE for P_O, P_I, P_C in the presence of bleaching.
-    """
-    P_O, P_I, P_C = y
-
-    # dP_O/dt = -k_OI*P_O + k_IO*P_I - k_B*P_O
-    dP_O = -p.k_OI * P_O + p.k_IO * P_I - p.k_B * P_O
-
-    # dP_I/dt = k_OI*P_O - (k_IO + k_IC + k_B)*P_I + k_CI*P_C
-    dP_I = p.k_OI * P_O - (p.k_IO + p.k_IC + p.k_B) * P_I + p.k_CI * P_C
-
-    # dP_C/dt = k_IC*P_I - k_CI*P_C - k_B*P_C
-    dP_C = p.k_IC * P_I - p.k_CI * P_C - p.k_B * P_C
-
-    return np.array([dP_O, dP_I, dP_C], dtype=float)
-
-
 @njit("float64[:](float64, float64[:], float64[:])", cache=True, fastmath=True, nogil=False)
 def rhs_hsp90_numba(t: float, y: np.ndarray, params: np.ndarray) -> np.ndarray:
-    # Unpack params array for speed (avoiding python object attribute access)
-    k_OI, k_IO, k_IC, k_CI, k_B = params[0], params[1], params[2], params[3], params[4]
-
+    """
+    Numba-optimized ODE for P_O, P_I, P_C with bleaching.
+    Parameters
+    ----------
+    t : float
+        Current time (not used in this ODE as it's time-invariant).
+    y : ndarray
+        Current state vector [P_O, P_I, P_C].
+    params : ndarray
+        Kinetic parameters: [k_OI, k_IO, k_IC, k_CI, k_BO, k_BI, k_BC].
+    Returns
+    -------
+    dPdt : ndarray
+        Time derivatives [dP_O/dt, dP_I/dt, dP_C/dt].
+    """
+    k_OI, k_IO, k_IC, k_CI, k_BO, k_BI, k_BC = params  # 7 kinetic params now
     P_O, P_I, P_C = y[0], y[1], y[2]
-
-    dP_O = -k_OI * P_O + k_IO * P_I - k_B * P_O
-    dP_I = k_OI * P_O - (k_IO + k_IC + k_B) * P_I + k_CI * P_C
-    dP_C = k_IC * P_I - k_CI * P_C - k_B * P_C
-
+    dP_O = -k_OI * P_O + k_IO * P_I - k_BO * P_O
+    dP_I =  k_OI * P_O - (k_IO + k_IC + k_BI) * P_I + k_CI * P_C
+    dP_C =  k_IC * P_I - k_CI * P_C - k_BC * P_C
     return np.array([dP_O, dP_I, dP_C], dtype=np.float64)
 
 def model_fret_3state(t_eval: np.ndarray, p: Hsp90Params3State) -> np.ndarray:
@@ -143,7 +138,7 @@ def model_fret_3state(t_eval: np.ndarray, p: Hsp90Params3State) -> np.ndarray:
         P_I0 = 1.0 - P_O0 - P_C0
 
     # y0 = [P_O0, P_I0, P_C0]
-    k_params = np.array([p.k_OI, p.k_IO, p.k_IC, p.k_CI, p.k_B], dtype=float)
+    k_params = np.array([p.k_OI, p.k_IO, p.k_IC, p.k_CI, p.k_BO, p.k_BI, p.k_BC], dtype=float)
     y0 = np.array([P_O0, P_I0, P_C0], dtype=float)
 
     sol = solve_ivp(
@@ -151,7 +146,7 @@ def model_fret_3state(t_eval: np.ndarray, p: Hsp90Params3State) -> np.ndarray:
         t_span=(t_eval.min(), t_eval.max()),
         y0=y0,
         t_eval=t_eval,
-        vectorized=True,
+        vectorized=False,
         args=(k_params,),  # <--- CRITICAL FIX: Must be a tuple
         method='RK45'
     )
@@ -179,7 +174,6 @@ def model_total_fret(t_eval: np.ndarray, fit: Hsp90Fit3State) -> np.ndarray:
     """
     E_dyn = model_fret_3state(t_eval, fit.params)
     return fit.f_dyn * E_dyn + (1.0 - fit.f_dyn) * fit.E_static
-
 
 # ----------------------------------------------------------------------
 # Data loading
@@ -360,7 +354,7 @@ def _fit_single_condition_worker(
             n_time=metrics["n_time"],
             rmse=metrics["rmse"],
             r2=metrics["r2"],
-            k_OI=p.k_OI, k_IO=p.k_IO, k_IC=p.k_IC, k_CI=p.k_CI, k_B=p.k_B,
+            k_OI=p.k_OI, k_IO=p.k_IO, k_IC=p.k_IC, k_CI=p.k_CI, k_BO=p.k_BO, k_BI=p.k_BI, k_BC=p.k_BC,
             E_open=p.E_open, E_inter=p.E_inter, E_closed=p.E_closed,
             P_O0=p.P_O0, P_C0=p.P_C0,
             f_dyn=fit.f_dyn, E_static=fit.E_static,
@@ -437,7 +431,7 @@ def fit_all_conditions(
     if not fits_list:
         summary_df = pd.DataFrame(columns=[
             "group_by", "group_key", "n_traj", "n_time", "rmse", "r2",
-            "k_OI", "k_IO", "k_IC", "k_CI", "k_B",
+            "k_OI", "k_IO", "k_IC", "k_CI", "k_BO", "k_BI", "k_BC",
             "E_open", "E_inter", "E_closed", "P_O0", "P_C0", "f_dyn", "E_static"
         ])
     else:
@@ -490,44 +484,43 @@ def fit_global_3state(
     if t_fit.size == 0:
         raise RuntimeError("No valid data for fitting.")
 
-    # theta = [k_OI, k_IO, k_IC, k_CI, k_B, E_o, E_i, E_c, P_O0, P_C0, f_dyn, E_static]
+    # 14 parameters: 7 rates + 3 FRET + 2 initials + 2 static
     if theta0 is None:
         theta0 = np.array([
-            0.01, 0.01, 0.01, 0.01,  # conformational rates
-            0.001,                   # bleaching rate
-            0.0, 0.0, 0.0,  # e0,d1,d2 (unconstrained init)
-            # 0.1, 0.3, 0.6,           # FRET levels
-            0.35, 0.55,                # P_O0, P_C0 (P_I0 = 0.1)
-            0.7, 0.18                # f_dyn, E_static
+            0.01, 0.01, 0.01, 0.01,  # k_OI, k_IO, k_IC, k_CI
+            0.003, 0.006, 0.012,  # k_BO, k_BI, k_BC
+            0.4, 0.5, 0.7,  # E_open, E_inter, E_closed (rough guesses)
+            0.35, 0.55,  # P_O0, P_C0
+            0.7, 0.18  # f_dyn, E_static
         ], dtype=float)
 
     lower = np.array([
-        0.0, 0.0, 0.0, 1e-4,   # rates >= 0
-        0.0,                  # k_B >= 0
-        -np.inf, -np.inf, -np.inf,  # FRET levels unbounded
-        # 0.0, 0.0, 0.0,        # FRET levels >= 0
-        0.0, 0.0,             # P_O0, P_C0 >= 0
-        0.0, 0.0              # f_dyn, E_static in [0,1]
+        0.0, 0.0, 0.0, 0.0,  # rates
+        0.0, 0.0, 0.0,  # bleaching
+        0.0, 0.0, 0.0,  # FRET in [0,1]
+        0.0, 0.0,  # P_O0, P_C0
+        0.0, 0.0  # f_dyn, E_static
     ], dtype=float)
 
     upper = np.array([
-        10.0, 10.0, 10.0, 10.0,  # conformational rates
-        10.0,                    # k_B
-        np.inf, np.inf, np.inf,  # FRET levels unbounded
-        # 1.0, 1.0, 1.0,           # FRET levels in [0,1]
-        1.0, 1.0,                # P_O0, P_C0 in [0,1]
-        1.0, 0.8                 # f_dyn, E_static in [0,1]
+        10.0, 10.0, 10.0, 10.0,
+        2.0, 2.0, 2.0,  # bleaching slower-ish
+        1.0, 1.0, 1.0,  # FRET ≤ 1
+        1.0, 1.0,
+        1.0, 1.0
     ], dtype=float)
 
-    def fret_wrapper_3s(t_in,
-                        k_oi, k_io, k_ic, k_ci, k_b,
-                        e0, d1, d2,
-                        p_o0, p_c0,
-                        f_dyn, e_static):
-        Eo, Ei, Ec = ordered_levels(e0, d1, d2)
+    def fret_wrapper_3s(
+            t_in,
+            k_oi, k_io, k_ic, k_ci, k_bo, k_bi, k_bc,
+            e_o, e_i, e_c,
+            p_o0, p_c0,
+            f_dyn, e_static
+    ):
         params = Hsp90Params3State(
-            k_OI=k_oi, k_IO=k_io, k_IC=k_ic, k_CI=k_ci, k_B=k_b,
-            E_open=Eo, E_inter=Ei, E_closed=Ec,
+            k_OI=k_oi, k_IO=k_io, k_IC=k_ic, k_CI=k_ci,
+            k_BO=k_bo, k_BI=k_bi, k_BC=k_bc,
+            E_open=e_o, E_inter=e_i, E_closed=e_c,
             P_O0=p_o0, P_C0=p_c0
         )
         E_dyn = model_fret_3state(t_in, params)
@@ -554,21 +547,27 @@ def fit_global_3state(
     #  p_o0, p_c0,
     #  f_dyn, e_static) = popt
 
-    (k_oi, k_io, k_ic, k_ci, k_b, e0, d1, d2, p_o0, p_c0, f_dyn, e_static) = popt
-    e_o, e_i, e_c = ordered_levels(e0, d1, d2)
+    (k_oi, k_io, k_ic, k_ci,
+     k_bo, k_bi, k_bc,
+     e_o, e_i, e_c,
+     p_o0, p_c0,
+     f_dyn, e_static) = popt
 
     params = Hsp90Params3State(
         k_OI=float(k_oi),
         k_IO=float(k_io),
         k_IC=float(k_ic),
         k_CI=float(k_ci),
-        k_B=float(k_b),
+        k_BO=float(k_bo),
+        k_BI=float(k_bi),
+        k_BC=float(k_bc),
         E_open=float(e_o),
         E_inter=float(e_i),
         E_closed=float(e_c),
         P_O0=float(p_o0),
         P_C0=float(p_c0),
     )
+
     return Hsp90Fit3State(params=params,
                           f_dyn=float(f_dyn),
                           E_static=float(e_static))
@@ -718,7 +717,9 @@ def _bootstrap_worker(
             k_IO=p.k_IO,
             k_IC=p.k_IC,
             k_CI=p.k_CI,
-            k_B=p.k_B,
+            k_BO=p.k_BO,
+            k_BI=p.k_BI,
+            k_BC=p.k_BC,
             E_open=p.E_open,
             E_inter=p.E_inter,
             E_closed=p.E_closed,
@@ -875,22 +876,22 @@ def main():
     plot_param_vs_condition(summary_cond, "f_dyn")
     plot_param_vs_condition(summary_cond, "E_closed")
 
-    # meta = parse_column_metadata(col_names)
-    #
-    # cond_A = "Hsp90_409_601_241107"
-    # cond_B = "Hsp90_409_601_241108"
-    #
-    # boot_A = bootstrap_condition_params(t, E_mat, col_names, meta, cond_A, n_boot=100)
-    # boot_B = bootstrap_condition_params(t, E_mat, col_names, meta, cond_B, n_boot=100)
-    #
-    # for param in ["k_OI", "k_IC", "f_dyn", "E_closed"]:
-    #     mA, loA, hiA = summarize_bootstrap(boot_A, param)
-    #     mB, loB, hiB = summarize_bootstrap(boot_B, param)
-    #     logger.info(param)
-    #     logger.info(f"  cond A: mean={mA:.4f}, 95% CI [{loA:.4f}, {hiA:.4f}]")
-    #     logger.info(f"  cond B: mean={mB:.4f}, 95% CI [{loB:.4f}, {hiB:.4f}]")
-    #
-    #     plot_bootstrap_compare(boot_A, boot_B, param, cond_A, cond_B)
+    meta = parse_column_metadata(col_names)
+
+    cond_A = "Hsp90_409_601_241107"
+    cond_B = "Hsp90_409_601_241108"
+
+    boot_A = bootstrap_condition_params(t, E_mat, col_names, meta, cond_A, n_boot=20)
+    boot_B = bootstrap_condition_params(t, E_mat, col_names, meta, cond_B, n_boot=20)
+
+    for param in ["k_OI", "k_IC", "f_dyn", "E_closed"]:
+        mA, loA, hiA = summarize_bootstrap(boot_A, param)
+        mB, loB, hiB = summarize_bootstrap(boot_B, param)
+        logger.info(param)
+        logger.info(f"  cond A: mean={mA:.4f}, 95% CI [{loA:.4f}, {hiA:.4f}]")
+        logger.info(f"  cond B: mean={mB:.4f}, 95% CI [{loB:.4f}, {hiB:.4f}]")
+
+        plot_bootstrap_compare(boot_A, boot_B, param, cond_A, cond_B)
 
 if __name__ == "__main__":
     main()
