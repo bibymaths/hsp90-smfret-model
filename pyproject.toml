@@ -1,30 +1,68 @@
 [project]
-name = "fret-fit"
+name = "Hsp90-Single-Molecule-FRET-Analysis"
 version = "0.1.0"
-description = "A pipeline for FRET simulation and fitting"
-authors = [{ name = "Abhinav Mishra" }]
 requires-python = ">=3.10"
 
+description = """
+Environment for analyzing single-molecule FRET trajectories from live-cell
+HILO/ALEX tracking experiments. Used to construct and fit a three-state
+(OPEN–INTERMEDIATE–CLOSED) Hsp90 kinetic model with bleaching and static
+fractions, based on trajectory extraction methods and analysis frameworks
+described in:
+- Anandamurugan et al., Biophys J (2026), FRET-TTB in living cells
+- Schrangl et al., JoVE (2021), automated 2D spatiotemporal smFRET analysis.
+
+This environment supports:
+• dense smFRET time series preprocessing
+• global nonlinear kinetic fitting with multistart optimization
+• bootstrap uncertainty estimation
+• Sobol global sensitivity analysis
+• numba-accelerated ODE models
+"""
+
+authors = [{ name = "Abhinav Mishra", email = "mishraabhinav36@gmail.com" }]
+license = "BSD-3-Clause"
+
+classifiers = [
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+
 dependencies = [
-    "numpy",
-    "scipy",
-    "pandas",
-    "matplotlib",
-    "tqdm",
-    "notebook",
-    "tables>=3.10.1",
-    "numba>=0.62.1",
-    "joblib>=1.5.2",
-    "rich>=14.2.0",
-    "salib>=1.5.2",
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "pandas>=2.0",
+  "matplotlib>=3.8",
+  "tables>=3.10.1",
+  "numba>=0.62.1",
+  "joblib>=1.5.2",
+  "rich>=14.2.0",
+  "SALib>=1.5.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "pytest-cov",
+  "black",
+  "ruff",
 ]
 
 [tool.uv]
-dev-dependencies = ["ipykernel"]
+dev-dependencies = [
+  "pytest",
+  "pytest-cov",
+  "black",
+  "ruff",
+]
 
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = []
+py-modules = []

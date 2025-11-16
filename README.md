@@ -1,4 +1,10 @@
 # **Hsp90 Single-Molecule FRET Analysis**
+ 
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
+[![License: CC BY 4.0](https://img.shields.io/badge/License-CC--BY--4.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
+ 
+[![Python >=3.10](https://img.shields.io/badge/Python-%3E%3D3.10-blue.svg)](https://www.python.org/)
+[![Scientific Computing](https://img.shields.io/badge/Scientific%20Computing-NumPy%20%7C%20SciPy%20%7C%20pandas-informational.svg)](https://scipy.org/)
 
 This repository provides a minimal pipeline to process **single-molecule FRET (.tracks/.h5)** data and fit a **three-state kinetic model** (Open ↔ Intermediate ↔ Closed) with state-dependent bleaching.
 
@@ -78,10 +84,10 @@ P_B
 \end{pmatrix}
 =
 \begin{pmatrix}
--(k_{OI}+k_{BO}) & k_{IO} & 0 & 0 \\
-k_{OI} & -(k_{IO}+k_{IC}+k_{BI}) & k_{CI} & 0 \\
-0 & k_{IC} & -(k_{CI}+k_{BC}) & 0 \\
-k_{BO} & k_{BI} & k_{BC} & 0
+-(k_{OI}+k_{BO}) & k_{IO}              & 0                      & 0 \\
+k_{OI}            & -(k_{IO}+k_{IC}+k_{BI}) & k_{CI}                 & 0 \\
+0                 & k_{IC}              & -(k_{CI}+k_{BC})       & 0 \\
+k_{BO}            & k_{BI}              & k_{BC}                 & 0
 \end{pmatrix}
 \begin{pmatrix}
 P_O \\
@@ -90,6 +96,9 @@ P_C \\
 P_B
 \end{pmatrix}
 $$
+ 
+where \( P_O, P_I, P_C, P_B \) are the probabilities of being in Open, Intermediate, Closed, and Bleached states, respectively.
+
 
 ## **Directory Structure**
 
