@@ -211,3 +211,4 @@ plots/
 /data/
 *.lock
 results/
+run*/

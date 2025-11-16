@@ -114,6 +114,7 @@ SPDX-License-Identifier: CC-BY-4.0
 import argparse
 import logging
 import shutil
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple, List, Optional, cast
@@ -132,6 +133,8 @@ from rich.theme import Theme
 from scipy.integrate import solve_ivp
 from scipy.integrate._ivp.ivp import OdeResult
 from scipy.optimize import curve_fit
+
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="SALib")
 
 # -----------------------
 # Command-line arguments
@@ -722,6 +725,7 @@ def _fit_single_condition_worker(
         meta: pd.DataFrame,
         group_by: str,
         n_starts: int,
+        n_jobs: int
 ) -> Optional[Tuple[str, Hsp90Fit3State, dict]]:
     """
     Internal worker for parallel fitting of a single condition.
@@ -756,7 +760,7 @@ def _fit_single_condition_worker(
         t_sub, E_sub = subset_matrix_by_columns(t, E_mat, col_names, cols_subset)
 
         # 2. Perform the heavy computational fit
-        fit = fit_global_3state(t_sub, E_sub, n_starts=n_starts)
+        fit = fit_global_3state(t_sub, E_sub, n_starts=n_starts, n_jobs=n_jobs)
 
         # 3. Compute metrics
         metrics = compute_ensemble_metrics(t_sub, E_sub, fit)
@@ -830,9 +834,9 @@ def fit_all_conditions(
     # --- PARALLEL FITTING ---
     # n_jobs=-1 uses all available CPU cores.
     # verbose=1 provides a progress update in the logger.info.
-    results = Parallel(n_jobs=n_jobs, verbose=100)(
+    results = Parallel(n_jobs=n_jobs, verbose=0)(
         delayed(_fit_single_condition_worker)(
-            key, t, E_mat, col_names, meta, group_by, n_starts
+            key, t, E_mat, col_names, meta, group_by, n_starts, n_jobs
         ) for key in group_keys
     )
     # ------------------------
@@ -884,6 +888,7 @@ def fit_global_3state(
         E_mat: np.ndarray,
         theta0: np.ndarray = None,
         n_starts: int = 5,
+        n_jobs: int = 1
 ) -> Hsp90Fit3State:
     """
     Fit the 3-state + bleaching model plus static fraction to the ensemble mean.
@@ -976,30 +981,42 @@ def fit_global_3state(
     # Multi-start around theta0 to avoid local minima
     # ------------------------------------------------------------------
     rng = np.random.default_rng(0)
-    best_popt: Optional[NDArray[np.float64]] = None
-    best_cost = np.inf
 
+    # Precompute all starting points deterministically
+    start_configs: list[tuple[int, np.ndarray, str]] = []
     for s in range(n_starts):
         if s == 0:
-            # first start = provided theta0 (or default)
             theta_start = theta0.copy()
-            logger.info(f"[fit_3state] multi-start {s + 1}/{n_starts}: using base θ0")
+            kind = "base"
         else:
-            # jitter around theta0 multiplicatively, then clip to bounds
             jitter = 1.0 + 0.3 * rng.normal(size=theta0.size)
             theta_start = theta0 * jitter
             theta_start = np.clip(theta_start, lower + 1e-8, upper - 1e-8)
-            logger.info(f"[fit_3state] multi-start {s + 1}/{n_starts}: jittered θ0")
+            kind = "jitter"
+        start_configs.append((s, theta_start, kind))
 
+    def _single_start_worker(cfg: tuple[int, np.ndarray, str]) -> dict:
+        """
+        Run one curve_fit multi-start and return diagnostics.
+
+        Parameters
+        ----------
+        cfg : tuple[int, ndarray, str]
+            (start_index, theta_start, kind)
+        Returns
+        -------
+        dict
+            Dictionary with fit result and diagnostics.
+        """
+        s, theta_start, kind = cfg
         try:
             res_obj = cast(object, curve_fit(
                 fret_wrapper_3s,
                 t_fit, E_fit,
                 p0=theta_start,
                 bounds=(lower, upper),
-                # The ensemble mean is very heteroscedastic (early time points have tighter variance than late ones).
-                # Using sigma=E_std in curve_fit down-weights noisy late times and stops E_static/E_closed from drifting to 1.
-                sigma=sigma, absolute_sigma=False,
+                sigma=sigma,
+                absolute_sigma=False,
                 maxfev=20000,
             ))
             popt, pcov = cast(
@@ -1007,24 +1024,69 @@ def fit_global_3state(
                 res_obj
             )
         except Exception as e:
-            logger.info(f"[fit_3state] multi-start {s + 1}/{n_starts} failed: {e}")
-            continue
+            return {
+                "s": s,
+                "kind": kind,
+                "ok": False,
+                "msg": str(e),
+                "popt": None,
+                "cost": np.inf,
+                "rmse": np.inf,
+            }
 
-        # Evaluate fit quality for this start
+        # Evaluate fit quality
         E_model = fret_wrapper_3s(t_fit, *popt)
         mask_obj = np.isfinite(E_fit) & np.isfinite(E_model)
         if not np.any(mask_obj):
-            logger.info(f"[fit_3state] multi-start {s + 1}/{n_starts}: no valid points")
-            continue
+            return {
+                "s": s,
+                "kind": kind,
+                "ok": False,
+                "msg": "no valid points",
+                "popt": None,
+                "cost": np.inf,
+                "rmse": np.inf,
+            }
 
         resid = E_fit[mask_obj] - E_model[mask_obj]
         cost = float(np.mean(resid ** 2))
         rmse = float(np.sqrt(cost))
-        logger.info(f"[fit_3state] multi-start {s + 1}/{n_starts}: RMSE = {rmse:.6f}")
+
+        return {
+            "s": s,
+            "kind": kind,
+            "ok": True,
+            "msg": "",
+            "popt": popt,
+            "cost": cost,
+            "rmse": rmse,
+        }
+
+    results = Parallel(n_jobs=n_jobs, verbose=0)(
+        delayed(_single_start_worker)(cfg) for cfg in start_configs
+    )
+
+    # Select best result
+    best_popt: Optional[NDArray[np.float64]] = None
+    best_cost = np.inf
+
+    for res in results:
+        s = res["s"]
+        kind = res["kind"]
+        if not res["ok"]:
+            msg = res["msg"]
+            logger.info(f"[fit_3state] multi-start {s + 1}/{n_starts} ({kind}) failed: {msg}")
+            continue
+
+        cost = res["cost"]
+        rmse = res["rmse"]
+        logger.info(
+            f"[fit_3state] multi-start {s + 1}/{n_starts} ({kind}): RMSE = {rmse:.6f}"
+        )
 
         if cost < best_cost:
             best_cost = cost
-            best_popt = popt
+            best_popt = res["popt"]
 
     if best_popt is None:
         raise RuntimeError("fit_global_3state: all multi-start attempts failed.")
@@ -1355,7 +1417,7 @@ def bootstrap_condition_params(
     # We pass t_sub and E_sub (large arrays) once,
     # and iterate over the unique seeds.
     # verbose=5 will show a progress bar
-    results = Parallel(n_jobs=n_jobs, verbose=100)(
+    results = Parallel(n_jobs=n_jobs, verbose=0)(
         delayed(_bootstrap_worker)(t_sub, E_sub, random_seed + b)
         for b in range(n_boot)
     )
@@ -1432,7 +1494,8 @@ def sobol_sensitivity_3state(
         t: np.ndarray,
         E_mat: np.ndarray,
         param_bounds: dict[str, tuple[float, float]],
-        n_base_samples: int = 512
+        n_base_samples: int = 512,
+        n_jobs: int = 1,
 ) -> dict:
     """
     Perform Sobol sensitivity analysis on the 3-state + bleaching + static model.
@@ -1490,17 +1553,15 @@ def sobol_sensitivity_3state(
     }
 
     # ---- 3. Generate samples --------------------------------
-    # Total evaluations ~ n_base_samples * (2D + 2)
     param_values = saltelli.sample(
         problem,
-        N=n_base_samples,  # base sample size
+        N=n_base_samples,
         calc_second_order=True
     )
 
-    # ---- 4. Evaluate model for each sample -----------------------------
-    Y = np.zeros(param_values.shape[0], dtype=float)
+    # ---- 4. Evaluate model for each sample -------
 
-    for i, theta in enumerate(param_values):
+    def _eval_one(theta: np.ndarray) -> float:
         # Map sample vector -> parameter dict
         p_dict = dict(zip(names, theta))
 
@@ -1537,15 +1598,20 @@ def sobol_sensitivity_3state(
             E_model = model_total_fret(t_fit, fit)
             mask_obj = np.isfinite(E_model) & np.isfinite(E_fit)
             if not np.any(mask_obj):
-                Y[i] = np.nan
-                continue
+                return np.nan
 
             r = E_fit[mask_obj] - E_model[mask_obj]
             rmse = np.sqrt(np.mean(r ** 2))
-            Y[i] = rmse
+            return float(rmse)
         except Exception:
-            # If integration fails, penalize heavily
-            Y[i] = np.nan
+            return np.nan
+
+    Y = np.array(
+        Parallel(n_jobs=n_jobs, verbose=0)(
+            delayed(_eval_one)(theta) for theta in param_values
+        ),
+        dtype=float,
+    )
 
     # Clean up NaNs
     valid_mask = np.isfinite(Y)
@@ -1564,7 +1630,8 @@ def sobol_sensitivity_3state(
         Y_valid,
         calc_second_order=True,
         print_to_console=False,
-        parallel=True
+        parallel=True,
+        n_processors=n_jobs
     )
 
     # Attach parameter names for convenience
@@ -1581,6 +1648,7 @@ def sobol_sensitivity_for_group(
         group_by: str,
         param_bounds: dict[str, tuple[float, float]],
         n_base_samples: int = 512,
+        n_jobs: int = 1
 ) -> pd.DataFrame:
     """
     Perform Sobol sensitivity analysis for a specific group/condition.
@@ -1629,6 +1697,7 @@ def sobol_sensitivity_for_group(
         E_sub,
         param_bounds=param_bounds,
         n_base_samples=n_base_samples,
+        n_jobs=n_jobs
     )
 
     # pack into a nice DataFrame
@@ -1759,7 +1828,7 @@ def plot_residuals_over_time(t, E_mat, fit, outdir):
     plt.figure(figsize=(8, 8))
     plt.plot(t_plot, r, lw=1)
     plt.axhline(0, ls="--", c="k", lw=1)
-    plt.xlabel("time (s)");
+    plt.xlabel("time (s)")
     plt.ylabel("residual (mean - model)")
     plt.title("Ensemble residuals over time")
     plt.tight_layout()
@@ -1781,7 +1850,7 @@ def main():
 
     # Global fit
     logger.info("[bold magenta]\n=== Global fit ===[/bold magenta]")
-    fit_hat = fit_global_3state(t, E_mat)
+    fit_hat = fit_global_3state(t, E_mat, n_starts=args.multistarts, n_jobs=args.cores)
     df_fit_hat = fit_to_df(fit_hat)
     log_df(df_fit_hat, title="Best-fit parameters (global)")
 
@@ -1874,6 +1943,7 @@ def main():
         E_mat,
         param_bounds,
         n_base_samples=512,
+        n_jobs=args.cores
     )
 
     # Inspect first-order and total-order indices as a table
@@ -1899,7 +1969,8 @@ def main():
                 group_key=key,
                 group_by="condition",
                 param_bounds=param_bounds,
-                n_base_samples=256,  # lower N if runtime is heavy
+                n_base_samples=256,
+                n_jobs=args.cores
             )
             sa_cond_list.append(df_sa)
         except Exception as e:
@@ -1927,6 +1998,7 @@ def main():
                 group_by="construct",
                 param_bounds=param_bounds,
                 n_base_samples=256,
+                n_jobs=args.cores
             )
             sa_constr_list.append(df_sa)
         except Exception as e:
