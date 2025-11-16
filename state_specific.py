@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple, List, Optional, cast
 
-from numpy._typing import NDArray
+from numpy.typing import NDArray
 from scipy.integrate import solve_ivp
 from scipy.optimize import curve_fit
 import matplotlib.pyplot as plt
