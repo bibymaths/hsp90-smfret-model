@@ -1,8 +1,7 @@
-# **Hsp90 Single-Molecule FRET Analysis**
+# Hsp90 Single-Molecule FRET Kinetic Modeling and Analysis Pipeline
  
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
 [![License: CC BY 4.0](https://img.shields.io/badge/License-CC--BY--4.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
- 
 [![Python >=3.10](https://img.shields.io/badge/Python-%3E%3D3.10-blue.svg)](https://www.python.org/)
 [![Scientific Computing](https://img.shields.io/badge/Scientific%20Computing-NumPy%20%7C%20SciPy%20%7C%20pandas-informational.svg)](https://scipy.org/)
 
