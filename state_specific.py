@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple, List, Optional, cast
 
+from SALib.sample import saltelli
+from SALib.analyze import sobol
 from numpy.typing import NDArray
 from scipy.integrate import solve_ivp
 from scipy.optimize import curve_fit
@@ -12,11 +14,15 @@ from numba import njit
 from joblib import Parallel, delayed
 
 import logging
-from rich.logging import RichHandler
+import shutil
 from rich.console import Console
 from rich.theme import Theme
+from rich.logging import RichHandler
 
-# --- Console + theme -------------------------------------------------
+# ------------------------------------------------------------------
+# Forced width + consistent console + working color scheme
+# ------------------------------------------------------------------
+
 custom_theme = Theme({
     "log.time": "dim cyan",
     "log.level.debug": "dim",
@@ -26,28 +32,57 @@ custom_theme = Theme({
     "log.level.critical": "bold white on red",
 })
 
-# Rich will automatically use the full terminal width by default
-console = Console(theme=custom_theme)
+term_width = shutil.get_terminal_size(fallback=(220, 24)).columns
 
-# --- Logging ---------------------------------------------------------
+console = Console(
+    theme=custom_theme,
+    width=term_width,
+    soft_wrap=False,
+    color_system="truecolor",     # <--- forces full color output
+    force_terminal=True,          # <--- forces colors even if stdout is piped
+)
+
+handler = RichHandler(
+    console=console,
+    rich_tracebacks=True,
+    markup=True,                  # <--- enables [bold red] etc.
+    show_time=True,
+    show_level=True,
+    enable_link_path=False,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",
+    handlers=[handler],           # <--- DO NOT call basicConfig before this!!!
     datefmt="[%X]",
-    handlers=[RichHandler(
-        console=console,
-        rich_tracebacks=True,
-        markup=True,
-        show_level=True,
-        show_time=True,
-    )],
 )
 
 logger = logging.getLogger(__name__)
 
+def log_df(df: pd.DataFrame,
+           title: str | None = None,
+           level: int = logging.INFO,
+           max_rows: int = 60) -> None:
+
+    if df is None or df.empty:
+        logger.log(level, "[bold yellow]DataFrame is empty[/bold yellow]")
+        return
+
+    if len(df) > max_rows:
+        df = df.head(max_rows)
+
+    with pd.option_context(
+        "display.width", console.width,
+        "display.max_columns", None,
+        "display.max_colwidth", console.width,
+    ):
+        if title:
+            logger.log(level, f"[bold cyan]{title}[/bold cyan]")
+        logger.log(level, "\n" + df.to_string(index=True))
 
 # ----------------------------------------------------------------------
-# Extended Model: Three-state Hsp90 dynamics + bleaching
+# Three-state Hsp90 dynamics + bleaching rates
 # States: Open (O) <-> Intermediate (I) <-> Closed (C) -> Bleached (B)
 # ----------------------------------------------------------------------
 
@@ -90,6 +125,27 @@ class Hsp90Fit3State:
     f_dyn: float       # fraction of molecules following the kinetic model
     E_static: float    # FRET level of static subpopulation
 
+def fit_to_df(fit: Hsp90Fit3State) -> pd.DataFrame:
+    """Flatten a single Hsp90Fit3State into a 1-row DataFrame."""
+    p = fit.params
+    row = {
+        "k_OI": p.k_OI,
+        "k_IO": p.k_IO,
+        "k_IC": p.k_IC,
+        "k_CI": p.k_CI,
+        "k_BO": p.k_BO,
+        "k_BI": p.k_BI,
+        "k_BC": p.k_BC,
+        "E_open": p.E_open,
+        "E_inter": p.E_inter,
+        "E_closed": p.E_closed,
+        "P_O0": p.P_O0,
+        "P_C0": p.P_C0,
+        "f_dyn": fit.f_dyn,
+        "E_static": fit.E_static,
+    }
+    return pd.DataFrame([row])
+
 def ordered_levels(e0, d1, d2):
     # map unconstrained to (0,1) with order via sigmoids
     Eo = 1 / (1 + np.exp(-e0))                  # (0,1)
@@ -126,20 +182,46 @@ def rhs_hsp90_numba(t: float, y: np.ndarray, params: np.ndarray) -> np.ndarray:
 def model_fret_3state(t_eval: np.ndarray, p: Hsp90Params3State) -> np.ndarray:
     """
     Dynamic part only: E_dyn(t) = E_O*P_O + E_I*P_I + E_C*P_C.
-    """
-    P_O0 = p.P_O0
-    P_C0 = p.P_C0
-    P_I0 = 1.0 - P_O0 - P_C0
-    # crude fix if guesses are pathological
-    if P_I0 < 0.0:
-        total = max(P_O0 + P_C0, 1e-9)
-        P_O0 = P_O0 / total * 0.999
-        P_C0 = P_C0 / total * 0.001
-        P_I0 = 1.0 - P_O0 - P_C0
 
-    # y0 = [P_O0, P_I0, P_C0]
-    k_params = np.array([p.k_OI, p.k_IO, p.k_IC, p.k_CI, p.k_BO, p.k_BI, p.k_BC], dtype=float)
+    This version enforces:
+      - 0 <= P_O0, P_I0, P_C0 <= 1
+      - P_O0 + P_I0 + P_C0 = 1   (all non-bleached states)
+    and clamps small numerical negatives in the solution.
+    """
+    # --- initial probabilities with normalization / clipping ---
+    P_O0 = float(p.P_O0)
+    P_C0 = float(p.P_C0)
+
+    # clip raw guesses to [0,1] first (hard box)
+    P_O0 = np.clip(P_O0, 0.0, 1.0)
+    P_C0 = np.clip(P_C0, 0.0, 1.0)
+
+    # provisional P_I0 from "whatever is left"
+    P_I0 = 1.0 - P_O0 - P_C0
+
+    # if that went negative (P_O0 + P_C0 > 1), renormalize
+    if P_I0 < 0.0:
+        total = max(P_O0 + P_C0, 1e-12)
+        P_O0 /= total
+        P_C0 /= total
+        P_I0 = 0.0
+    else:
+        # all three non-negative; now renormalize to sum exactly 1
+        total = P_O0 + P_I0 + P_C0
+        if total <= 0.0:
+            # completely pathological guess -> bail with NaNs
+            return np.full_like(t_eval, np.nan, dtype=float)
+        P_O0 /= total
+        P_I0 /= total
+        P_C0 /= total
+
     y0 = np.array([P_O0, P_I0, P_C0], dtype=float)
+
+    # kinetic parameters (already box-constrained in the fit)
+    k_params = np.array(
+        [p.k_OI, p.k_IO, p.k_IC, p.k_CI, p.k_BO, p.k_BI, p.k_BC],
+        dtype=float
+    )
 
     sol = solve_ivp(
         fun=rhs_hsp90_numba,
@@ -147,21 +229,35 @@ def model_fret_3state(t_eval: np.ndarray, p: Hsp90Params3State) -> np.ndarray:
         y0=y0,
         t_eval=t_eval,
         vectorized=False,
-        args=(k_params,),  # <--- CRITICAL FIX: Must be a tuple
-        method='RK45'
+        args=(k_params,),
+        # method='RK45',
     )
 
     if not sol.success:
         return np.full_like(t_eval, np.nan, dtype=float)
 
-    P_O_t = sol.y[0]
-    P_I_t = sol.y[1]
-    P_C_t = sol.y[2]
+    # clamp tiny negative / >1 probabilities from numerical error
+    P = np.clip(sol.y, 0.0, 1.0)
+
+    # optional: renormalize so P_O + P_I + P_C <= 1 (rest is bleached)
+    S = P.sum(axis=0)
+    mask = S > 1.0
+    if np.any(mask):
+        P[:, mask] /= S[mask]
+
+    P_O_t = P[0]
+    P_I_t = P[1]
+    P_C_t = P[2]
+
+    # also make sure FRET levels live in [0,1]
+    E_open   = np.clip(p.E_open,   0.0, 1.0)
+    E_inter  = np.clip(p.E_inter,  0.0, 1.0)
+    E_closed = np.clip(p.E_closed, 0.0, 1.0)
 
     E_t = (
-        p.E_open * P_O_t +
-        p.E_inter * P_I_t +
-        p.E_closed * P_C_t
+        E_open   * P_O_t +
+        E_inter  * P_I_t +
+        E_closed * P_C_t
     )
     return E_t
 
@@ -411,7 +507,7 @@ def fit_all_conditions(
     # --- PARALLEL FITTING ---
     # n_jobs=-1 uses all available CPU cores.
     # verbose=1 provides a progress update in the logger.info.
-    results = Parallel(n_jobs=-1, verbose=5)(
+    results = Parallel(n_jobs=4, verbose=100)(
         delayed(_fit_single_condition_worker)(
             key, t, E_mat, col_names, meta, group_by
         ) for key in group_keys
@@ -463,9 +559,11 @@ def fit_global_3state(
         t: np.ndarray,
         E_mat: np.ndarray,
         theta0: np.ndarray = None,
+        n_starts: int = 5,
 ) -> Hsp90Fit3State:
     """
     Fit the 3-state + bleaching model plus static fraction to the ensemble mean.
+    Uses a small multi-start strategy around theta0 to avoid bad local minima.
     """
     row_valid = np.isfinite(E_mat).any(axis=1)
     t_fit = t[row_valid]
@@ -488,24 +586,24 @@ def fit_global_3state(
     if theta0 is None:
         theta0 = np.array([
             0.01, 0.01, 0.01, 0.01,  # k_OI, k_IO, k_IC, k_CI
-            0.003, 0.006, 0.012,  # k_BO, k_BI, k_BC
-            0.4, 0.5, 0.7,  # E_open, E_inter, E_closed (rough guesses)
-            0.35, 0.55,  # P_O0, P_C0
-            0.7, 0.18  # f_dyn, E_static
+            0.003, 0.006, 0.012,     # k_BO, k_BI, k_BC
+            0.4, 0.5, 0.7,           # E_open, E_inter, E_closed (rough guesses)
+            0.35, 0.55,              # P_O0, P_C0
+            0.7, 0.18                # f_dyn, E_static
         ], dtype=float)
 
     lower = np.array([
         0.0, 0.0, 0.0, 0.0,  # rates
-        0.0, 0.0, 0.0,  # bleaching
-        0.0, 0.0, 0.0,  # FRET in [0,1]
-        0.0, 0.0,  # P_O0, P_C0
-        0.0, 0.0  # f_dyn, E_static
+        0.0, 0.0, 0.0,       # bleaching
+        0.0, 0.0, 0.0,       # FRET in [0,1]
+        0.0, 0.0,            # P_O0, P_C0
+        0.0, 0.0             # f_dyn, E_static
     ], dtype=float)
 
     upper = np.array([
         10.0, 10.0, 10.0, 10.0,
-        2.0, 2.0, 2.0,  # bleaching slower-ish
-        1.0, 1.0, 1.0,  # FRET ≤ 1
+        2.0, 2.0, 2.0,      # bleaching slower-ish
+        1.0, 1.0, 1.0,      # FRET ≤ 1
         1.0, 1.0,
         1.0, 1.0
     ], dtype=float)
@@ -526,20 +624,65 @@ def fit_global_3state(
         E_dyn = model_fret_3state(t_in, params)
         return f_dyn * E_dyn + (1.0 - f_dyn) * e_static
 
-    res_obj = cast(object, curve_fit(
-        fret_wrapper_3s,
-        t_fit, E_fit,
-        p0=theta0,
-        bounds=(lower, upper),
-        # The ensemble mean is very heteroscedastic (early time points have tighter variance than late ones).
-        # Using sigma=E_std in curve_fit down-weights noisy late times and stops E_static/E_closed from drifting to 1.
-        sigma=sigma, absolute_sigma=True,
-        maxfev=20000,
-    ))
-    popt, pcov = cast(
-        Tuple[NDArray[np.float64], NDArray[np.float64]],
-        res_obj
-    )
+    # ------------------------------------------------------------------
+    # Multi-start around theta0 to avoid pathological local minima
+    # ------------------------------------------------------------------
+    rng = np.random.default_rng(0)
+    best_popt: Optional[NDArray[np.float64]] = None
+    best_cost = np.inf
+
+    for s in range(n_starts):
+        if s == 0:
+            # first start = provided theta0 (or default)
+            theta_start = theta0.copy()
+            logger.info(f"[fit_3state] multi-start {s+1}/{n_starts}: using base θ0")
+        else:
+            # jitter around theta0 multiplicatively, then clip to bounds
+            jitter = 1.0 + 0.3 * rng.normal(size=theta0.size)
+            theta_start = theta0 * jitter
+            theta_start = np.clip(theta_start, lower + 1e-8, upper - 1e-8)
+            logger.info(f"[fit_3state] multi-start {s+1}/{n_starts}: jittered θ0")
+
+        try:
+            res_obj = cast(object, curve_fit(
+                fret_wrapper_3s,
+                t_fit, E_fit,
+                p0=theta_start,
+                bounds=(lower, upper),
+                # The ensemble mean is very heteroscedastic (early time points have tighter variance than late ones).
+                # Using sigma=E_std in curve_fit down-weights noisy late times and stops E_static/E_closed from drifting to 1.
+                sigma=sigma, absolute_sigma=False,
+                maxfev=20000,
+            ))
+            popt, pcov = cast(
+                Tuple[NDArray[np.float64], NDArray[np.float64]],
+                res_obj
+            )
+        except Exception as e:
+            logger.info(f"[fit_3state] multi-start {s+1}/{n_starts} failed: {e}")
+            continue
+
+        # Evaluate fit quality for this start
+        E_model = fret_wrapper_3s(t_fit, *popt)
+        mask_obj = np.isfinite(E_fit) & np.isfinite(E_model)
+        if not np.any(mask_obj):
+            logger.info(f"[fit_3state] multi-start {s+1}/{n_starts}: no valid points")
+            continue
+
+        resid = E_fit[mask_obj] - E_model[mask_obj]
+        cost = float(np.mean(resid**2))
+        rmse = float(np.sqrt(cost))
+        logger.info(f"[fit_3state] multi-start {s+1}/{n_starts}: RMSE = {rmse:.6f}")
+
+        if cost < best_cost:
+            best_cost = cost
+            best_popt = popt
+
+    if best_popt is None:
+        raise RuntimeError("fit_global_3state: all multi-start attempts failed.")
+
+    logger.info(f"[fit_3state] selected solution with RMSE = {np.sqrt(best_cost):.6f}")
+    popt = best_popt
 
     # Unpack fitted parameters
     # (k_oi, k_io, k_ic, k_ci, k_b,
@@ -616,7 +759,7 @@ def plot_ensemble_fit(t: np.ndarray, E_mat: np.ndarray, fit: Hsp90Fit3State) -> 
     lo = min(xmin, ymin)
     hi = max(xmax, ymax)
 
-    plt.figure(figsize=(6, 6))
+    plt.figure(figsize=(8, 8))
     plt.scatter(E_mod, E_obs, s=20, alpha=0.8, label="Time points (ensemble mean)")
     plt.plot([lo, hi], [lo, hi], "k--", lw=1.5, label="y = x")
 
@@ -662,7 +805,7 @@ def plot_hsp90_fit_time(
     else:
         E_subset = None
 
-    fig, ax = plt.subplots(figsize=(8, 4))
+    fig, ax = plt.subplots(figsize=(8, 8))
 
     if E_subset is not None:
         for j in range(E_subset.shape[1]):
@@ -768,7 +911,7 @@ def bootstrap_condition_params(
     # We pass t_sub and E_sub (large arrays) once,
     # and iterate over the unique seeds.
     # verbose=5 will show a progress bar
-    results = Parallel(n_jobs=-1, verbose=5)(
+    results = Parallel(n_jobs=4, verbose=100)(
         delayed(_bootstrap_worker)(t_sub, E_sub, random_seed + b)
         for b in range(n_boot)
     )
@@ -783,8 +926,224 @@ def bootstrap_condition_params(
 
     return pd.DataFrame(records)
 
+def plot_bootstrap_errorbars_all_conditions(
+    boot_summary: pd.DataFrame,
+    param: str,
+    title_suffix: str = "",
+) -> None:
+    """
+    Plot bootstrap mean ± 95% CI for a single parameter across all conditions.
+
+    Expects boot_summary with columns:
+      group_key, param, mean, lo, hi
+    """
+    df = boot_summary[boot_summary["param"] == param].copy()
+    if df.empty:
+        logger.info(f"No bootstrap summary for param={param}")
+        return
+
+    df = df.sort_values("group_key")
+    x = np.arange(len(df))
+    y = df["mean"].values
+    yerr_lower = y - df["lo"].values
+    yerr_upper = df["hi"].values - y
+    yerr = np.vstack([yerr_lower, yerr_upper])
+
+    plt.figure(figsize=(8, 4))
+    plt.errorbar(
+        x,
+        y,
+        yerr=yerr,
+        fmt="o",
+        capsize=4,
+        linewidth=1.5,
+    )
+    plt.xticks(x, df["group_key"], rotation=45, ha="right")
+    plt.ylabel(param)
+    plt.title(f"Bootstrap 95% CI across conditions{title_suffix}")
+    plt.tight_layout()
+    plt.show(dpi=300)
+
+def sobol_sensitivity_3state(
+    t: np.ndarray,
+    E_mat: np.ndarray,
+    param_bounds: dict[str, tuple[float, float]],
+    n_base_samples: int = 512,
+    use_static: bool = True,
+) -> dict:
+    """
+    Global sensitivity analysis (Sobol) for the 3-state Hsp90 model.
+
+    - Uses ensemble RMSE (mean data - model) as the scalar objective.
+    - param_bounds: mapping from parameter name to (lower, upper) bounds.
+      Allowed names:
+        "k_OI", "k_IO", "k_IC", "k_CI",
+        "k_BO", "k_BI", "k_BC",
+        "E_open", "E_inter", "E_closed",
+        "P_O0", "P_C0",
+        "f_dyn", "E_static"
+
+    Returns
+    -------
+    result : dict
+        Contains Sobol indices: S1, ST, (and S2 if calc_second_order=True).
+    """
+
+    # ---- 1. Prepare data: ensemble mean for objective -----------------
+    row_valid = np.isfinite(E_mat).any(axis=1)
+    t_fit = t[row_valid]
+    E_mean = np.nanmean(E_mat[row_valid, :], axis=1)
+
+    mask = np.isfinite(E_mean)
+    t_fit = t_fit[mask]
+    E_fit = E_mean[mask]
+
+    if t_fit.size == 0:
+        raise RuntimeError("No valid data for sensitivity analysis.")
+
+    # ---- 2. Define SALib problem --------------------------------------
+    # Order of parameters
+    names = list(param_bounds.keys())
+    bounds = [param_bounds[n] for n in names]
+
+    problem = {
+        "num_vars": len(names),
+        "names": names,
+        "bounds": bounds,
+    }
+
+    # ---- 3. Generate samples (Saltelli) --------------------------------
+    # Total evaluations ~ n_base_samples * (2D + 2)
+    param_values = saltelli.sample(
+        problem,
+        N=n_base_samples,  # base sample size
+        calc_second_order=True
+    )
+
+    # ---- 4. Evaluate model for each sample -----------------------------
+    Y = np.zeros(param_values.shape[0], dtype=float)
+
+    for i, theta in enumerate(param_values):
+        # Map sample vector -> parameter dict
+        p_dict = dict(zip(names, theta))
+
+        # Defaults if not varied
+        k_OI = p_dict.get("k_OI", 0.08)
+        k_IO = p_dict.get("k_IO", 0.01)
+        k_IC = p_dict.get("k_IC", 0.08)
+        k_CI = p_dict.get("k_CI", 0.01)
+
+        k_BO = p_dict.get("k_BO", 0.003)
+        k_BI = p_dict.get("k_BI", 0.006)
+        k_BC = p_dict.get("k_BC", 0.012)
+
+        E_open   = p_dict.get("E_open",   0.35)
+        E_inter  = p_dict.get("E_inter",  0.55)
+        E_closed = p_dict.get("E_closed", 0.75)
+
+        P_O0 = p_dict.get("P_O0", 0.4)
+        P_C0 = p_dict.get("P_C0", 0.5)
+
+        f_dyn   = p_dict.get("f_dyn",   0.7)
+        E_static = p_dict.get("E_static", 0.2)
+
+        params = Hsp90Params3State(
+            k_OI=k_OI, k_IO=k_IO, k_IC=k_IC, k_CI=k_CI,
+            k_BO=k_BO, k_BI=k_BI, k_BC=k_BC,
+            E_open=E_open, E_inter=E_inter, E_closed=E_closed,
+            P_O0=P_O0, P_C0=P_C0,
+        )
+
+        fit = Hsp90Fit3State(params=params, f_dyn=f_dyn, E_static=E_static)
+
+        try:
+            E_model = model_total_fret(t_fit, fit)
+            mask_obj = np.isfinite(E_model) & np.isfinite(E_fit)
+            if not np.any(mask_obj):
+                Y[i] = np.nan
+                continue
+
+            r = E_fit[mask_obj] - E_model[mask_obj]
+            rmse = np.sqrt(np.mean(r**2))
+            Y[i] = rmse
+        except Exception:
+            # If integration fails, penalize heavily
+            Y[i] = np.nan
+
+    # Clean up NaNs (drop failed runs)
+    valid_mask = np.isfinite(Y)
+    if not np.any(valid_mask):
+        raise RuntimeError("All Sobol evaluations failed or returned NaN.")
+
+    Y_valid = Y[valid_mask]
+    X_valid = param_values[valid_mask, :]
+    n_valid = X_valid.shape[0]
+
+    logger.info(f"Sensitivity analysis: {n_valid}/{len(Y)} evaluations valid.")
+
+    # Re-run analysis only on valid samples
+    # (SALib expects same problem, but with matching length)
+    Si = sobol.analyze(
+        problem,
+        Y_valid,
+        calc_second_order=True,
+        print_to_console=False,
+        parallel=True
+    )
+
+    # Attach parameter names for convenience
+    Si["names"] = names
+    return Si
+
+def sobol_sensitivity_for_group(
+    t: np.ndarray,
+    E_mat: np.ndarray,
+    col_names: list[str],
+    meta: pd.DataFrame,
+    group_key: str,
+    group_by: str,
+    param_bounds: dict[str, tuple[float, float]],
+    n_base_samples: int = 512,
+) -> pd.DataFrame:
+    """
+    Run Sobol sensitivity analysis for a single group
+    (condition or construct).
+
+    Returns a tidy DataFrame with columns:
+      group_by, group_key, param, S1, ST, S1_conf, ST_conf
+    """
+    cols_subset = meta.loc[meta[group_by] == group_key, "col"].tolist()
+    if not cols_subset:
+        raise ValueError(f"No columns found for {group_by}={group_key!r}")
+
+    # subset matrix
+    t_sub, E_sub = subset_matrix_by_columns(t, E_mat, col_names, cols_subset)
+
+    logger.info(f"Running Sobol SA for {group_by}={group_key}, "
+                f"{E_sub.shape[1]} traj, {E_sub.shape[0]} time points")
+
+    Si = sobol_sensitivity_3state(
+        t_sub,
+        E_sub,
+        param_bounds=param_bounds,
+        n_base_samples=n_base_samples,
+    )
+
+    # pack into a nice DataFrame
+    df_sa = pd.DataFrame({
+        "param":   Si["names"],
+        "S1":      Si["S1"],
+        "S1_conf": Si["S1_conf"],
+        "ST":      Si["ST"],
+        "ST_conf": Si["ST_conf"],
+    })
+    df_sa.insert(0, "group_key", group_key)
+    df_sa.insert(0, "group_by", group_by)
+
+    return df_sa
+
 def plot_param_vs_condition(summary_df, param):
-    plt.figure()
+    plt.figure(figsize=(8, 8))
     plt.plot(summary_df["group_key"], summary_df[param], "o-")
     plt.xticks(rotation=90)
     plt.ylabel(param)
@@ -802,7 +1161,7 @@ def plot_bootstrap_compare(boot_A, boot_B, param, label_A, label_B):
     A_vals = boot_A[param].values
     B_vals = boot_B[param].values
 
-    plt.figure()
+    plt.figure(figsize=(8, 8))
     plt.hist(A_vals, bins=30, alpha=0.5, density=True, label=label_A)
     plt.hist(B_vals, bins=30, alpha=0.5, density=True, label=label_B)
     plt.xlabel(param)
@@ -817,7 +1176,7 @@ def plot_residuals_over_time(t, E_mat, fit):
     E_mean = np.nanmean(E_mat[row_valid, :], axis=1)
     E_model = model_total_fret(t_plot, fit)
     r = E_mean - E_model
-    plt.figure()
+    plt.figure(figsize=(8, 8))
     plt.plot(t_plot, r, lw=1)
     plt.axhline(0, ls="--", c="k", lw=1)
     plt.xlabel("time (s)"); plt.ylabel("residual (mean - model)")
@@ -833,12 +1192,13 @@ def main():
     combined_path = Path("data/timeseries/fret_matrix.csv")
     t, E_mat, col_names = load_combined_matrix(combined_path)
 
-    logger.info(f"\n\nLoaded combined matrix: {E_mat.shape[0]} time points, {E_mat.shape[1]} trajectories")
+    logger.info(f"Loaded combined matrix: {E_mat.shape[0]} time points, {E_mat.shape[1]} trajectories")
 
     # Global fit (all trajectories pooled)
+    logger.info("[bold magenta]\n=== Global fit (all trajectories pooled) ===[/bold magenta]")
     fit_hat = fit_global_3state(t, E_mat)
-    logger.info("\nBest-fit parameters (global):")
-    logger.info(fit_hat)
+    df_fit_hat = fit_to_df(fit_hat)
+    log_df(df_fit_hat, title="Best-fit parameters (global)")
 
     # Global diagnostics
     plot_ensemble_fit(t, E_mat, fit_hat)
@@ -847,20 +1207,25 @@ def main():
 
     # Now: per-condition fits
     # 1) Per coverslip/day (construct + exp_id)
-    logger.info("\n=== Per-condition fits (construct + exp_id) ===")
+    logger.info("[bold magenta]\n=== Per-condition fits (construct + exp_id) ===[/bold magenta]")
     summary_cond, fits_cond = fit_all_conditions(
         t,
         E_mat,
         col_names,
-        group_by="condition",     # "<construct>_<exp_id>"
-        do_plots=True,           # set True if you want per-condition time plots
+        group_by="condition",  # "<construct>_<exp_id>"
+        do_plots=True,
         max_overlay_traces=100,
     )
-    logger.info("\nCondition-level summary:")
-    logger.info(summary_cond.sort_values(["group_key"]))
+    if not summary_cond.empty:
+        log_df(
+            summary_cond.sort_values("group_key"),
+            title="Condition-level summary"
+        )
+    else:
+        logger.info("[bold yellow]No condition-level fits were produced.[/bold yellow]")
 
     # 2) Per construct (pooling all days), if you want
-    logger.info("\n=== Per-construct fits (pool all exp_id for each construct) ===")
+    logger.info("[bold magenta]\n=== Per-construct fits (pool all exp_id for each construct) ===[/bold magenta]")
     summary_constr, fits_constr = fit_all_conditions(
         t,
         E_mat,
@@ -869,29 +1234,247 @@ def main():
         do_plots=True,
         max_overlay_traces=100,
     )
-    logger.info("\nConstruct-level summary:")
-    logger.info(summary_constr.sort_values(["group_key"]))
+    if not summary_constr.empty:
+        log_df(
+            summary_constr.sort_values("group_key"),
+            title="Construct-level summary"
+        )
+    else:
+        logger.info("[bold yellow]No construct-level fits were produced.[/bold yellow]")
 
-    plot_param_vs_condition(summary_cond, "k_OI")
-    plot_param_vs_condition(summary_cond, "f_dyn")
-    plot_param_vs_condition(summary_cond, "E_closed")
+    # plot_param_vs_condition(summary_cond, "k_OI")
+    # plot_param_vs_condition(summary_cond, "f_dyn")
+    # plot_param_vs_condition(summary_cond, "E_closed")
+    #
+    # meta = parse_column_metadata(col_names)
+    #
+    # param_bounds = {
+    #     "k_OI": (0.0, 10.0),
+    #     "k_IO": (0.0, 10.0),
+    #     "k_IC": (0.0, 10.0),
+    #     "k_CI": (0.0, 10.0),
+    #
+    #     "k_BO": (0.0, 2.0),
+    #     "k_BI": (0.0, 2.0),
+    #     "k_BC": (0.0, 2.0),
+    #
+    #     "E_open": (0.0, 1.0),
+    #     "E_inter": (0.0, 1.0),
+    #     "E_closed": (0.0, 1.0),
+    #
+    #     "P_O0": (0.0, 1.0),
+    #     "P_C0": (0.0, 1.0),
+    #
+    #     "f_dyn": (0.0, 1.0),
+    #     "E_static": (0.0, 1.0),
+    # }
+    #
+    # Si = sobol_sensitivity_3state(
+    #     t,
+    #     E_mat,
+    #     param_bounds,
+    #     n_base_samples=512,
+    # )
+    #
+    # # Inspect first-order and total-order indices as a table
+    # df_sobol = pd.DataFrame({
+    #     "param": Si["names"],
+    #     "S1": Si["S1"],
+    #     "S1_conf": Si["S1_conf"],
+    #     "ST": Si["ST"],
+    #     "ST_conf": Si["ST_conf"],
+    # })
+    # log_df(df_sobol, title="Global Sobol sensitivity (all trajectories)")
+    #
+    # # === Sobol sensitivity per condition ==============================
+    # sa_cond_list: list[pd.DataFrame] = []
+    #
+    # for key in summary_cond["group_key"]:
+    #     try:
+    #         df_sa = sobol_sensitivity_for_group(
+    #             t=t,
+    #             E_mat=E_mat,
+    #             col_names=col_names,
+    #             meta=meta,
+    #             group_key=key,
+    #             group_by="condition",
+    #             param_bounds=param_bounds,
+    #             n_base_samples=256,   # lower N if runtime is heavy
+    #         )
+    #         sa_cond_list.append(df_sa)
+    #     except Exception as e:
+    #         logger.info(f"[condition SA] Skipped {key}: {e}")
+    #
+    # if sa_cond_list:
+    #     sa_cond = pd.concat(sa_cond_list, ignore_index=True)
+    #     log_df(sa_cond, title="Sobol sensitivity – per condition")
+    #     # Optionally save:
+    #     # sa_cond.to_csv("results/sobol_condition.csv", index=False)
+    # else:
+    #     logger.info("No per-condition Sobol results.")
+    #
+    #
+    # # === Sobol sensitivity per construct ==============================
+    # sa_constr_list: list[pd.DataFrame] = []
+    #
+    # for key in summary_constr["group_key"]:
+    #     try:
+    #         df_sa = sobol_sensitivity_for_group(
+    #             t=t,
+    #             E_mat=E_mat,
+    #             col_names=col_names,
+    #             meta=meta,
+    #             group_key=key,
+    #             group_by="construct",
+    #             param_bounds=param_bounds,
+    #             n_base_samples=256,
+    #         )
+    #         sa_constr_list.append(df_sa)
+    #     except Exception as e:
+    #         logger.info(f"[construct SA] Skipped {key}: {e}")
+    #
+    # if sa_constr_list:
+    #     sa_constr = pd.concat(sa_constr_list, ignore_index=True)
+    #     log_df(sa_constr, title="Sobol sensitivity – per construct")
+    #     # Optionally save:
+    #     # sa_constr.to_csv("results/sobol_construct.csv", index=False)
+    # else:
+    #     logger.info("No per-construct Sobol results.")
+    #
+    # # === Bootstrap for ALL conditions ================================
+    # logger.info("\n=== Bootstrap parameter uncertainty per condition ===")
+    #
+    # boot_records: list[dict] = []
+    # boot_raw: dict[str, pd.DataFrame] = {}
+    #
+    # # choose which parameters you care about
+    # params_of_interest = ["k_OI", "k_IC", "f_dyn", "E_closed"]
+    #
+    # for key in summary_cond["group_key"]:
+    #     logger.info(f"\n[bootstrap] condition={key}")
+    #     try:
+    #         boot_df = bootstrap_condition_params(
+    #             t=t,
+    #             E_mat=E_mat,
+    #             col_names=col_names,
+    #             meta=meta,
+    #             group_key=key,
+    #             group_by="condition",
+    #             n_boot=10,        # adjust (e.g. 100) if you want more precision
+    #             random_seed=0,
+    #         )
+    #     except Exception as e:
+    #         logger.info(f"  bootstrap failed for {key}: {e}")
+    #         continue
+    #
+    #     if boot_df.empty:
+    #         logger.info(f"  no successful bootstrap fits for {key}")
+    #         continue
+    #
+    #     boot_raw[key] = boot_df
+    #
+    #     # summarize mean + 95% CI per parameter
+    #     for p in params_of_interest:
+    #         if p not in boot_df.columns:
+    #             continue
+    #         m, lo, hi = summarize_bootstrap(boot_df, p)
+    #         boot_records.append(
+    #             dict(
+    #                 group_key=key,
+    #                 param=p,
+    #                 mean=m,
+    #                 lo=lo,
+    #                 hi=hi,
+    #                 n_boot=len(boot_df),
+    #             )
+    #         )
+    #
+    # if not boot_records:
+    #     logger.info("No bootstrap summaries computed.")
+    # else:
+    #     boot_summary = pd.DataFrame(boot_records)
+    #     log_df(boot_summary, title="Bootstrap summary (mean ± 95% CI per condition/param)")
+    #
+    #     # Plot all conditions together for each parameter of interest
+    #     for p in params_of_interest:
+    #         plot_bootstrap_errorbars_all_conditions(
+    #             boot_summary,
+    #             param=p,
+    #             title_suffix=" (condition-level)",
+    #         )
+    #
+    # # === Bootstrap for ALL constructs ================================
+    # logger.info("\n=== Bootstrap parameter uncertainty per construct ===")
+    #
+    # boot_records_constr: list[dict] = []
+    # boot_raw_constr: dict[str, pd.DataFrame] = {}
+    #
+    # for key in summary_constr["group_key"]:
+    #     logger.info(f"\n[bootstrap] construct={key}")
+    #     try:
+    #         boot_df = bootstrap_condition_params(
+    #             t=t,
+    #             E_mat=E_mat,
+    #             col_names=col_names,
+    #             meta=meta,
+    #             group_key=key,
+    #             group_by="construct",
+    #             n_boot=10,
+    #             random_seed=0,
+    #         )
+    #     except Exception as e:
+    #         logger.info(f"  bootstrap failed for construct {key}: {e}")
+    #         continue
+    #
+    #     if boot_df.empty:
+    #         logger.info(f"  no successful bootstrap fits for construct {key}")
+    #         continue
+    #
+    #     boot_raw_constr[key] = boot_df
+    #
+    #     for p in params_of_interest:
+    #         if p not in boot_df.columns:
+    #             continue
+    #         m, lo, hi = summarize_bootstrap(boot_df, p)
+    #         boot_records_constr.append(
+    #             dict(
+    #                 group_type="construct",
+    #                 group_key=key,
+    #                 param=p,
+    #                 mean=m,
+    #                 lo=lo,
+    #                 hi=hi,
+    #                 n_boot=len(boot_df),
+    #             )
+    #         )
+    #
+    # if not boot_records_constr:
+    #     logger.info("No bootstrap summaries computed for constructs.")
+    # else:
+    #     boot_summary_constr = pd.DataFrame(boot_records_constr)
+    #     log_df(boot_summary_constr, title="Bootstrap summary (mean ± 95% CI per construct/param)")
+    #
+    #     for p in params_of_interest:
+    #         plot_bootstrap_errorbars_all_conditions(
+    #             boot_summary_constr,
+    #             param=p,
+    #             title_suffix=" (construct-level)",
+    #         )
 
-    meta = parse_column_metadata(col_names)
-
-    cond_A = "Hsp90_409_601_241107"
-    cond_B = "Hsp90_409_601_241108"
-
-    boot_A = bootstrap_condition_params(t, E_mat, col_names, meta, cond_A, n_boot=20)
-    boot_B = bootstrap_condition_params(t, E_mat, col_names, meta, cond_B, n_boot=20)
-
-    for param in ["k_OI", "k_IC", "f_dyn", "E_closed"]:
-        mA, loA, hiA = summarize_bootstrap(boot_A, param)
-        mB, loB, hiB = summarize_bootstrap(boot_B, param)
-        logger.info(param)
-        logger.info(f"  cond A: mean={mA:.4f}, 95% CI [{loA:.4f}, {hiA:.4f}]")
-        logger.info(f"  cond B: mean={mB:.4f}, 95% CI [{loB:.4f}, {hiB:.4f}]")
-
-        plot_bootstrap_compare(boot_A, boot_B, param, cond_A, cond_B)
+    # cond_A = "Hsp90_409_601_241107"
+    # cond_B = "Hsp90_409_601_241108"
+    #
+    # boot_A = bootstrap_condition_params(t, E_mat, col_names, meta, cond_A, n_boot=20)
+    # boot_B = bootstrap_condition_params(t, E_mat, col_names, meta, cond_B, n_boot=20)
+    #
+    # for param in ["k_OI", "k_IC", "f_dyn", "E_closed"]:
+    #     mA, loA, hiA = summarize_bootstrap(boot_A, param)
+    #     mB, loB, hiB = summarize_bootstrap(boot_B, param)
+    #     logger.info(param)
+    #     logger.info(f"  cond A: mean={mA:.4f}, 95% CI [{loA:.4f}, {hiA:.4f}]")
+    #     logger.info(f"  cond B: mean={mB:.4f}, 95% CI [{loB:.4f}, {hiB:.4f}]")
+    #
+    #     plot_bootstrap_compare(boot_A, boot_B, param, cond_A, cond_B)
 
 if __name__ == "__main__":
     main()

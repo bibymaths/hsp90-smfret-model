@@ -58,7 +58,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
 # === Configuration ===
 data_dir = Path("data/Hugel_2025")   # adjust path
 key = "/tracks/Data"                 # default key
-frame_interval = 0.1                # seconds per frame
+frame_interval = 0.07  # seconds per frame (70 ms, as in Anandamurugan et al. 2026)
 fret_max = 0.9                         # max FRET efficiency to consider
 fret_min = 0.1                         # min FRET efficiency to consider
 USE_INTERPOLATION = False             # Set to False to disable cubic splines/filling
@@ -368,11 +368,52 @@ else:
 
     # Build one DataFrame - time x trajectories
     combined = pd.DataFrame(columns)
-    # Filter for upto 100 seconds
-    combined = combined[combined["time_s"] <= 100.0]
+
+    # --- CLEANUP OF WIDE MATRIX ---
+
+    # 1) Make sure time_s exists
+    if "time_s" not in combined.columns:
+        raise ValueError("Expected 'time_s' column in combined matrix.")
+
+    # All trajectory columns (everything except time_s)
+    traj_cols = [c for c in combined.columns if c != "time_s"]
+
+    # 2) Drop trajectory columns that are entirely NaN
+    traj_cols = [c for c in traj_cols if combined[c].notna().any()]
+    combined = combined[["time_s"] + traj_cols]
+
+    # 3) Enforce valid FRET range and set out-of-range values to NaN
+    #    (important when USE_INTERPOLATION = False, because interpolate_trace
+    #     won't clip values then)
+    for c in traj_cols:
+        mask_invalid = (combined[c] < fret_min) | (combined[c] > fret_max)
+        combined.loc[mask_invalid, c] = np.nan
+
+    # 4) Drop rows where all trajectories are NaN
+    if traj_cols:
+        mask_any = combined[traj_cols].notna().any(axis=1)
+        combined = combined[mask_any].reset_index(drop=True)
+
+    # 5) Drop very short traces (e.g. < 10 valid points after filtering)
+    min_points_per_trace = 10
+    if traj_cols:
+        valid_counts = combined[traj_cols].notna().sum(axis=0)
+        keep_traces = valid_counts[valid_counts >= min_points_per_trace].index.tolist()
+        combined = combined[["time_s"] + keep_traces]
+        traj_cols = keep_traces  # update
+    else:
+        traj_cols = []
+
+    # 6) (Optional) Cap time window if you really want a hard limit.
+    #    If you want to be faithful to the experiment, you can either skip this
+    #    or use ~90 s as an upper bound instead of 100 s.
+    # max_time = 90.0
+    # combined = combined[combined["time_s"] <= max_time]
+
+    # --- SAVE CLEANED MATRIX ---
     combined.to_csv(combined_out, index=False)
-    logger.info(f"Combined matrix saved → {combined_out}")
-    logger.info(f"Time points: {len(time_grid)}, trajectories: {combined.shape[1] - 1}")
+    logger.info(f"Combined (cleaned) matrix saved → {combined_out}")
+    logger.info(f"Time points: {combined.shape[0]}, trajectories: {combined.shape[1] - 1}")
 
 # === Cleanup: remove all per-particle CSVs except the combined matrix ===
 for f in export_dir.glob("*.csv"):
