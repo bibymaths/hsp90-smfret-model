@@ -1,11 +1,12 @@
 # Hsp90 Single-Molecule FRET Kinetic Modeling and Analysis Pipeline
- 
+
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
 [![License: CC BY 4.0](https://img.shields.io/badge/License-CC--BY--4.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
 [![Python >=3.10](https://img.shields.io/badge/Python-%3E%3D3.10-blue.svg)](https://www.python.org/)
 [![Scientific Computing](https://img.shields.io/badge/Scientific%20Computing-NumPy%20%7C%20SciPy%20%7C%20pandas-informational.svg)](https://scipy.org/)
 
-This repository provides a minimal pipeline to process **single-molecule FRET (.tracks/.h5)** data and fit a **three-state kinetic model** (Open ↔ Intermediate ↔ Closed) with state-dependent bleaching.
+This repository provides a minimal pipeline to process **single-molecule FRET (.tracks/.h5)** data and fit a *
+*three-state kinetic model** (Open ↔ Intermediate ↔ Closed) with state-dependent bleaching.
 
 The code implements the computational analysis used to interpret the datasets from:
 
@@ -15,6 +16,8 @@ The code implements the computational analysis used to interpret the datasets fr
 ---
 
 ## **Workflow**
+ 
+Download the Zenodo dataset<sup>1</sup> and place all .h5 tracking files into `data/Hugel_2025/` before running the pipeline. 
 
 ### 1. Extract & clean trajectories
 
@@ -59,9 +62,9 @@ The fitted model contains:
 
 ---
 
-### **State Diagram** 
+### **State Diagram**
 
-![Model Diagram](images/img.png) 
+![Model Diagram](images/img.png)
 
 #### **Model Description**
 
@@ -90,8 +93,8 @@ P_O \\ P_I \\ P_C \\ P_B
 \end{pmatrix}
 ```
 
-where \( P_O, P_I, P_C, P_B \) are the probabilities of being in Open, Intermediate, Closed, and Bleached states, respectively.
-
+where \( P_O, P_I, P_C, P_B \) are the probabilities of being in Open, Intermediate, Closed, and Bleached states,
+respectively.
 
 ## **Directory Structure**
 
@@ -105,6 +108,23 @@ results/          # Fits, plots, bootstrap, Sobol
 
 ---
 
+## **References**
+
+<a id="1"></a>
+[1] Hugel, T. (2025). Datasets for “Single-molecule FRET and tracking of transfected biomolecules in living
+cells” [Data set]. Biophysical Journal, 125(March 3), 1–9. Zenodo. https://doi.org/10.5281/zenodo.17559063
+
+[2] **Schrangl, L.**, Göhring, J., Kellner, F., Huppa, J. B., & Schütz, G. J. (2021). *Automated Two-dimensional
+Spatiotemporal Analysis of Mobile Single-molecule FRET Probes.* **Journal of Visualized Experiments**, 177,
+e63124. [https://doi.org/10.3791/63124](https://doi.org/10.3791/63124)
+
+[3] **Anandamurugan, A.**, Eidloth, A., Frank, V., Wortmann, P., Schrangl, L., Lan, C., Schütz, G. J., & Hugel, T. (
+2025). *Single-molecule FRET and tracking of transfected biomolecules in living cells.* **Biophysical Journal**,
+S0006-3495(25)00604-6. Advance online
+publication. [https://doi.org/10.1016/j.bpj.2025.09.024](https://doi.org/10.1016/j.bpj.2025.09.024)
+
+---
+
 ## **Licensing**
 
 * **Code** → BSD-3-Clause
@@ -113,3 +133,5 @@ results/          # Fits, plots, bootstrap, Sobol
 See `LICENSE` for details.
 
 ---
+
+
