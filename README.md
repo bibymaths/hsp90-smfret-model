@@ -5,19 +5,14 @@
 [![Python >=3.10](https://img.shields.io/badge/Python-%3E%3D3.10-blue.svg)](https://www.python.org/)
 [![Scientific Computing](https://img.shields.io/badge/Scientific%20Computing-NumPy%20%7C%20SciPy%20%7C%20pandas-informational.svg)](https://scipy.org/)
 
-This repository provides a minimal pipeline to process **single-molecule FRET (.tracks/.h5)** data and fit a *
-*three-state kinetic model** (Open ↔ Intermediate ↔ Closed) with state-dependent bleaching.
-
-The code implements the computational analysis used to interpret the datasets from:
-
-**Anandamurugan et al., Biophysical Journal (2025)**
-**Schrangl & Schütz et al., JoVE (2021)**
+This repository provides a minimal pipeline to process **single-molecule FRET (.tracks/.h5)** data<sup>[1]</sup> and fit a  
+**three-state kinetic model** (Open ↔ Intermediate ↔ Closed) with state-dependent bleaching.
 
 ---
 
 ## **Workflow**
  
-Download the Zenodo dataset<sup>1</sup> and place all .h5 tracking files into `data/Hugel_2025/` before running the pipeline. 
+Download the Zenodo dataset<sup>[1]</sup> and place all .h5 tracking files into `data/Hugel_2025/` before running the pipeline. 
 
 ### 1. Extract & clean trajectories
 
