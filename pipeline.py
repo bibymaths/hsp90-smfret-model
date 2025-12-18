@@ -113,6 +113,7 @@ SPDX-License-Identifier: CC-BY-4.0
 
 import argparse
 import logging
+import os
 import shutil
 import warnings
 from dataclasses import dataclass
@@ -1631,7 +1632,7 @@ def sobol_sensitivity_3state(
         calc_second_order=True,
         print_to_console=False,
         parallel=True,
-        n_processors=n_jobs
+        n_processors=os.cpu_count() if n_jobs == -1 else n_jobs,
     )
 
     # Attach parameter names for convenience
