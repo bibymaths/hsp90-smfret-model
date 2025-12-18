@@ -8,8 +8,58 @@
 This repository provides a minimal pipeline to process **single-molecule FRET (.tracks/.h5)** data<sup>[1]</sup> and fit a  
 **three-state kinetic model** (Open ↔ Intermediate ↔ Closed) with state-dependent bleaching.
 
----
+--- 
 
+## **Data** 
+
+The data is too big for LFS storage. Download the dataset from Zenodo<sup>[1]</sup> and place uzipped files in `data/Hugel_2025/`. 
+
+```bash 
+aria2c \
+  -x 16 \
+  -s 16 \
+  -k 1M \
+  -c \
+  -o FRET_TTB_Raw_Data.zip \
+  "https://zenodo.org/records/17559063/files/FRET_TTB_Raw_Data.zip?download=1"
+```
+ 
+or 
+
+```bash
+wget \
+  -c \
+  --tries=0 \
+  --read-timeout=20 \
+  --timeout=20 \
+  --continue \
+  -O FRET_TTB_Raw_Data.zip \
+  "https://zenodo.org/records/17559063/files/FRET_TTB_Raw_Data.zip?download=1"
+```
+
+or 
+
+```bash
+curl \
+  -L \
+  -C - \
+  --retry 10 \
+  --retry-delay 5 \
+  --retry-all-errors \
+  -o FRET_TTB_Raw_Data.zip \
+  "https://zenodo.org/records/17559063/files/FRET_TTB_Raw_Data.zip?download=1"
+```
+
+Use this command to get the dataset from local to remote server:
+
+```bash
+rsync -a --info=progress2 --partial --inplace \
+  --compress-choice=zstd --compress-level=3 \
+  data/ user@host:/home/userpath/hsp90-smfret-model/data/
+```
+
+
+---
 ## **Workflow**
  
 Download the Zenodo dataset<sup>[1]</sup> and place all .h5 tracking files into `data/Hugel_2025/` before running the pipeline. 

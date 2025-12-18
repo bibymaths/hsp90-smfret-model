@@ -208,7 +208,7 @@ __marimo__/
 
 # User dirs
 plots/
-/data/
+data/
 *.lock
 results/
 run*/
