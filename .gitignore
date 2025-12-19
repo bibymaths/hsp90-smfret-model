@@ -210,5 +210,5 @@ __marimo__/
 plots/
 data/
 *.lock
-results/
+results*/
 run*/

@@ -423,20 +423,11 @@ def rhs_hsp90_numba(t: float, y: np.ndarray, params: np.ndarray) -> np.ndarray:
     dPdt : ndarray
         Time derivatives [dP_O/dt, dP_I/dt, dP_C/dt].
     """
-    k_OI, k_IO, k_IC, k_CI, k_BO, k_BI, k_BC = params
-
-    # k_OI, k_IO, k_IC, k_CI = params
-
+    k_OI, k_IO, k_IC, k_CI, k_BO, k_BI, k_BC = params  # 7 kinetic params now
     P_O, P_I, P_C = y[0], y[1], y[2]
-
     dP_O = -k_OI * P_O + k_IO * P_I - k_BO * P_O
     dP_I = k_OI * P_O - (k_IO + k_IC + k_BI) * P_I + k_CI * P_C
     dP_C = k_IC * P_I - k_CI * P_C - k_BC * P_C
-
-    # dP_O = -k_OI * P_O + k_IO * P_I
-    # dP_I = k_OI * P_O - (k_IO + k_IC) * P_I + k_CI * P_C
-    # dP_C = k_IC * P_I - k_CI * P_C
-
     return np.array([dP_O, dP_I, dP_C], dtype=np.float64)
 
 
@@ -926,14 +917,11 @@ def fit_all_conditions(
 # ----------------------------------------------------------------------
 def fret_wrapper_3s(
         t_in,
-        k_oi, k_io, k_ic, k_ci, # k_bo, k_bi, k_bc,
+        k_oi, k_io, k_ic, k_ci, k_bo, k_bi, k_bc,
         e_o, e_i, e_c,
         p_o0, p_c0,
         f_dyn, e_static
 ):
-    # HARDCODED: Force bleaching to zero here
-    k_bo, k_bi, k_bc = 0.0, 0.0, 0.0
-
     params = Hsp90Params3State(
         k_OI=k_oi, k_IO=k_io, k_IC=k_ic, k_CI=k_ci,
         k_BO=k_bo, k_BI=k_bi, k_BC=k_bc,
@@ -999,7 +987,7 @@ def fit_global_3state(
     if theta0 is None:
         theta0 = np.array([
             0.01, 0.01, 0.01, 0.01,  # k_OI, k_IO, k_IC, k_CI
-            # 0.003, 0.006, 0.012,  # k_BO, k_BI, k_BC
+            0.003, 0.006, 0.012,  # k_BO, k_BI, k_BC
             0.4, 0.5, 0.7,  # E_open, E_inter, E_closed (rough guesses)
             0.35, 0.55,  # P_O0, P_C0
             0.7, 0.18  # f_dyn, E_static
@@ -1007,7 +995,7 @@ def fit_global_3state(
 
     lower = np.array([
         0.0, 0.0, 0.0, 0.0,  # rates
-        # 0.0, 0.0, 0.0,  # bleaching
+        0.0, 0.0, 0.0,  # bleaching
         0.0, 0.0, 0.0,  # FRET in [0,1]
         0.0, 0.0,  # P_O0, P_C0
         0.0, 0.0  # f_dyn, E_static
@@ -1015,7 +1003,7 @@ def fit_global_3state(
 
     upper = np.array([
         10.0, 10.0, 10.0, 10.0,
-        # 2.0, 2.0, 2.0,  # bleaching slower-ish
+        2.0, 2.0, 2.0,  # bleaching slower-ish
         1.0, 1.0, 1.0,  # FRET ≤ 1
         1.0, 1.0,
         1.0, 1.0
@@ -1139,40 +1127,20 @@ def fit_global_3state(
     logger.info(f"[fit_3state] selected solution with RMSE = {np.sqrt(best_cost):.6f}")
     popt = best_popt
 
-    # (k_oi, k_io, k_ic, k_ci,
-    #  k_bo, k_bi, k_bc,
-    #  e_o, e_i, e_c,
-    #  p_o0, p_c0,
-    #  f_dyn, e_static) = popt
-
     (k_oi, k_io, k_ic, k_ci,
+     k_bo, k_bi, k_bc,
      e_o, e_i, e_c,
      p_o0, p_c0,
      f_dyn, e_static) = popt
-
-    # params = Hsp90Params3State(
-    #     k_OI=float(k_oi),
-    #     k_IO=float(k_io),
-    #     k_IC=float(k_ic),
-    #     k_CI=float(k_ci),
-    #     k_BO=float(k_bo),
-    #     k_BI=float(k_bi),
-    #     k_BC=float(k_bc),
-    #     E_open=float(e_o),
-    #     E_inter=float(e_i),
-    #     E_closed=float(e_c),
-    #     P_O0=float(p_o0),
-    #     P_C0=float(p_c0),
-    # )
 
     params = Hsp90Params3State(
         k_OI=float(k_oi),
         k_IO=float(k_io),
         k_IC=float(k_ic),
         k_CI=float(k_ci),
-        k_BO=0.0,
-        k_BI=0.0,
-        k_BC=0.0,
+        k_BO=float(k_bo),
+        k_BI=float(k_bi),
+        k_BC=float(k_bc),
         E_open=float(e_o),
         E_inter=float(e_i),
         E_closed=float(e_c),
