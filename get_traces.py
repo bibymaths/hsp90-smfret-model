@@ -61,20 +61,33 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
 
 # === Global configuration (overridden by CLI in main) ===
-data_dir = Path("data/Hugel_2025")   # adjusted via --data-dir
-export_dir = Path("data/timeseries") # adjusted via --export-dir
-key = "/tracks/Data"                 # default key
-frame_interval = 0.07                # seconds per frame (70 ms, as in Anandamurugan et al. 2026)
-fret_max = 1.0                       # max FRET efficiency to consider
-fret_min = 0.0                       # min FRET efficiency to consider
-USE_INTERPOLATION = False            # Set to False - disable cubic splines/filling
+data_dir = Path("data/Hugel_2025")  # adjusted via --data-dir
+export_dir = Path("data/timeseries")  # adjusted via --export-dir
+key = "/tracks/Data"  # default key
+frame_interval = 0.07  # seconds per frame (70 ms, as in Anandamurugan et al. 2026)
+fret_max = 1.0  # max FRET efficiency to consider
+fret_min = 0.0  # min FRET efficiency to consider
+USE_INTERPOLATION = False  # Set to False - disable cubic splines/filling
+# --- correction factors (defaults; override by CLI) ---
+alpha = 0.0  # donor leakage into acceptor channel
+delta = 0.0  # direct excitation of acceptor by donor laser
+gamma = 1.0  # detection/quantum yield factor
+
+# Stoichiometry window (typical paper QC; override by CLI)
+S_min = 0.35
+S_max = 0.60
+
+# Pre-bleach trimming parameters
+BLEACH_MIN_FRAC = 0.20  # acceptor intensity below 20% of early baseline -> bleached
+BLEACH_CONSEC = 3  # must stay low for >= 3 consecutive points
+BASELINE_N = 10  # use first N points to define baseline
 
 
 def interpolate_trace(
-    time_grid: np.ndarray,
-    t_trace: np.ndarray,
-    E_trace: np.ndarray,
-    interpolate: bool = True,
+        time_grid: np.ndarray,
+        t_trace: np.ndarray,
+        E_trace: np.ndarray,
+        interpolate: bool = True,
 ) -> np.ndarray:
     """
     Interpolate a single FRET trace onto a common time grid using cubic splines.
@@ -150,16 +163,132 @@ def interpolate_trace(
     y[(y < fret_min) | (y > fret_max)] = np.nan
     return y
 
+def _sample_particles(df: pd.DataFrame, n: int = 20, seed: int = 0) -> list[int]:
+    pids = df["fret_particle"].dropna().unique()
+    if len(pids) == 0:
+        return []
+    rng = np.random.default_rng(seed)
+    n = min(n, len(pids))
+    return rng.choice(pids, size=n, replace=False).tolist()
+
+def plot_file_qc(df: pd.DataFrame,
+                 outdir: Path,
+                 tag: str,
+                 n_particles: int = 20) -> None:
+    """
+    df must already include:
+      - time_s, fret_particle, fret_exc_type
+      - E (Dex only), S
+      - fret_f_dd, fret_f_da, fret_f_aa
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    dex = df[df["fret_exc_type"] == "d"].copy()
+    aex = df[df["fret_exc_type"] == "a"].copy()
+
+    # pick some particles for line plots
+    pids = _sample_particles(df, n=n_particles, seed=0)
+
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    ax1, ax2, ax3, ax4 = axes.ravel()
+
+    # (1) Dex E(t) for sampled particles
+    for pid in pids:
+        tr = dex[dex["fret_particle"] == pid]
+        if len(tr) == 0:
+            continue
+        ax1.plot(tr["time_s"], tr["E"], linewidth=1, alpha=0.7)
+    ax1.set_title("Dex: E(t) sampled particles")
+    ax1.set_xlabel("time (s)")
+    ax1.set_ylabel("E")
+
+    # (2) Histogram of S (all frames)
+    s = df["S"].to_numpy()
+    s = s[np.isfinite(s)]
+    if s.size:
+        ax2.hist(s, bins=60)
+    ax2.set_title("Stoichiometry S distribution")
+    ax2.set_xlabel("S")
+    ax2.set_ylabel("count")
+    ax2.axvline(S_min, linestyle="--")
+    ax2.axvline(S_max, linestyle="--")
+
+    # (3) Histogram of E (Dex only)
+    e = dex["E"].to_numpy()
+    e = e[np.isfinite(e)]
+    if e.size:
+        ax3.hist(e, bins=60)
+    ax3.set_title("Dex: E distribution")
+    ax3.set_xlabel("E")
+    ax3.set_ylabel("count")
+
+    # (4) Aex AA(t) for sampled particles (bleach indicator)
+    for pid in pids:
+        tr = aex[aex["fret_particle"] == pid]
+        if len(tr) == 0:
+            continue
+        ax4.plot(tr["time_s"], tr["fret_f_aa"], linewidth=1, alpha=0.7)
+    ax4.set_title("Aex: AA(t) sampled particles")
+    ax4.set_xlabel("time (s)")
+    ax4.set_ylabel("AA")
+
+    fig.suptitle(tag)
+    fig.tight_layout()
+    fig.savefig(outdir / f"{tag}_QC.png", dpi=300)
+    plt.close(fig)
+
+def plot_construct_summary(export_dir: Path, outdir: Path) -> None:
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    csvs = [p for p in export_dir.glob("*.csv") if p.name != "fret_matrix.csv"]
+    if not csvs:
+        return
+
+    # group files by construct inferred from filename stem
+    groups = {}
+    for p in csvs:
+        stem = p.stem
+        parts = stem.split("-")
+        construct = parts[2].split(".")[0] if len(parts) >= 3 else "unknown"
+        groups.setdefault(construct, []).append(p)
+
+    for construct, files in groups.items():
+        # stack all E traces by aligning on time_s via merge
+        # simplest: concatenate, then aggregate
+        all_df = []
+        for f in files:
+            d = pd.read_csv(f)
+            d["src"] = f.name
+            all_df.append(d)
+        big = pd.concat(all_df, ignore_index=True)
+
+        # aggregate at each time
+        agg = big.groupby("time_s")["E"].agg(
+            median="median",
+            q25=lambda x: np.nanquantile(x, 0.25),
+            q75=lambda x: np.nanquantile(x, 0.75),
+            n="count",
+        ).reset_index()
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.plot(agg["time_s"], agg["median"])
+        ax.fill_between(agg["time_s"], agg["q25"], agg["q75"], alpha=0.3)
+        ax.set_title(f"{construct}: median E(t) with IQR band")
+        ax.set_xlabel("time (s)")
+        ax.set_ylabel("E")
+        fig.tight_layout()
+        fig.savefig(outdir / f"{construct}_summary.png", dpi=300)
+        plt.close(fig)
 
 def inspect_and_plot_data(
-    data_dir: Path,
-    frame_interval: float,
-    fret_min: float,
-    fret_max: float,
-    key: str = "/tracks/Data",
-    save_plots: bool = True,
-    plot_dir: Path | None = None,
-    show_plots: bool = False,
+        data_dir: Path,
+        frame_interval: float,
+        fret_min: float,
+        fret_max: float,
+        key: str = "/tracks/Data",
+        save_plots: bool = True,
+        plot_dir: Path | None = None,
+        show_plots: bool = False,
 ) -> None:
     """
     Inspect all *.tracks* files, log basic info and
@@ -222,14 +351,10 @@ def inspect_and_plot_data(
             df["time_s"] = df["donor_frame"] * frame_interval
 
         # Step 8 — detect FRET column
-        fret_candidates = ["fret_eff", "fret_eff_app", "fret_efficiency"]
-        fret_col = next((c for c in fret_candidates if c in df.columns), None)
-
-        if fret_col is None:
-            logger.warning(
-                f"No FRET column found (checked: {', '.join(fret_candidates)}). Skipping plot.\n"
-            )
-            continue
+        if {"fret_f_dd", "fret_f_da", "fret_exc_type"}.issubset(df.columns):
+            dex = df["fret_exc_type"] == "d"
+            df.loc[dex, "E_raw"] = df.loc[dex, "fret_f_da"] / (df.loc[dex, "fret_f_da"] + df.loc[dex, "fret_f_dd"])
+            fret_col = "E_raw"
 
         # Ensure we have a time axis
         if "time_s" not in df.columns:
@@ -251,28 +376,202 @@ def inspect_and_plot_data(
             traj = df.sort_values("time_s")
             label = f"{construct} {exp_id} – all data (no particle id)"
 
-        # Plot representative trace
+        # --- NEW: ALEX-aware plotting ---
+        has_alex = {"fret_f_dd", "fret_f_da", "fret_f_aa", "fret_exc_type"}.issubset(df.columns)
+
+        if not has_alex:
+            logger.warning("No ALEX columns found; skipping plot.\n")
+            continue
+
+        # Optional: apply manual filter like in export (avoid plotting rejected points)
+        if "filter_manual" in df.columns:
+            df = df[df["filter_manual"] != 0]
+
+        # Keep only known excitation tags
+        df = df[df["fret_exc_type"].isin(["d", "a"])].copy()
+
+        # Ensure time axis
+        if "time_s" not in df.columns:
+            if "donor_frame" in df.columns:
+                df["time_s"] = df["donor_frame"] * frame_interval
+            else:
+                logger.warning("No donor_frame/time info found. Skipping plot.\n")
+                continue
+
+        # Choose representative particle (longest)
+        part_col = "fret_particle" if "fret_particle" in df.columns else None
+        if part_col is not None:
+            counts = df.groupby(part_col).size()
+            longest_pid = counts.sort_values(ascending=False).index[0]
+            traj = df[df[part_col] == longest_pid].sort_values("time_s").copy()
+            label = f"{construct} {exp_id} – particle {int(longest_pid)}"
+        else:
+            traj = df.sort_values("time_s").copy()
+            label = f"{construct} {exp_id} – all data (no particle id)"
+
+        # Compute corrected E and S (Dex-only E)
+        try:
+            traj2 = compute_corrected_E_S(traj, alpha=alpha, delta=delta, gamma=gamma)
+        except Exception as e:
+            logger.warning(f"Could not compute corrected E/S for plotting: {e}")
+            traj2 = traj.copy()
+            traj2["E"] = np.nan
+            traj2["S"] = np.nan
+
+        dex = traj2["fret_exc_type"] == "d"
+        aex = traj2["fret_exc_type"] == "a"
+
+        # Raw Dex-only E (uncorrected) for sanity
+        traj2["E_raw"] = np.nan
+        denom_raw = traj2.loc[dex, "fret_f_da"] + traj2.loc[dex, "fret_f_dd"]
+        traj2.loc[dex, "E_raw"] = traj2.loc[dex, "fret_f_da"] / denom_raw.replace(0, np.nan)
+
+        # ----- Plot 1: E(t) raw vs corrected (Dex frames only) -----
         fig, ax = plt.subplots()
-        ax.plot(traj["time_s"], traj[fret_col], marker="o", linestyle="-", markersize=3)
+        ax.plot(traj2.loc[dex, "time_s"], traj2.loc[dex, "E_raw"], marker="o", linestyle="-", markersize=2, label="E_raw (Dex)")
+        ax.plot(traj2.loc[dex, "time_s"], traj2.loc[dex, "E"],     marker="o", linestyle="-", markersize=2, label="E_corr (Dex)")
         ax.set_xlabel("time (s)")
-        ax.set_ylabel(f"{fret_col}")
-        ax.set_title(label)
+        ax.set_ylabel("FRET E")
+        ax.set_title(label + " – Dex E(t)")
+        ax.set_ylim(fret_min - 0.05, fret_max + 0.05)
+        ax.legend()
         fig.tight_layout()
 
         if save_plots and plot_dir is not None:
-            # create a file-name–safe stem
             safe_label = f"{construct}_{exp_id}"
             if part_col is not None:
                 safe_label += f"_p{int(longest_pid)}"
-            out_png = plot_dir / f"{safe_label}.png"
-            fig.savefig(out_png, dpi=300)
-            logger.info(f"Saved plot → {out_png}")
-
+            fig.savefig(plot_dir / f"{safe_label}_E.png", dpi=300)
         if show_plots:
             plt.show()
         else:
             plt.close(fig)
 
+        # ----- Plot 2: Stoichiometry S(t) -----
+        fig, ax = plt.subplots()
+        ax.plot(traj2["time_s"], traj2["S"], marker="o", linestyle="-", markersize=2)
+        ax.axhline(S_min, linestyle="--")
+        ax.axhline(S_max, linestyle="--")
+        ax.set_xlabel("time (s)")
+        ax.set_ylabel("Stoichiometry S")
+        ax.set_title(label + " – S(t)")
+        ax.set_ylim(-0.05, 1.05)
+        fig.tight_layout()
+
+        if save_plots and plot_dir is not None:
+            safe_label = f"{construct}_{exp_id}"
+            if part_col is not None:
+                safe_label += f"_p{int(longest_pid)}"
+            fig.savefig(plot_dir / f"{safe_label}_S.png", dpi=300)
+        if show_plots:
+            plt.show()
+        else:
+            plt.close(fig)
+
+        # ----- Plot 3: Intensities by excitation (DD/DA on Dex, AA on Aex) -----
+        fig, ax = plt.subplots()
+        ax.plot(traj2.loc[dex, "time_s"], traj2.loc[dex, "fret_f_dd"], marker="o", linestyle="-", markersize=2, label="DD (Dex)")
+        ax.plot(traj2.loc[dex, "time_s"], traj2.loc[dex, "fret_f_da"], marker="o", linestyle="-", markersize=2, label="DA (Dex)")
+        ax.plot(traj2.loc[aex, "time_s"], traj2.loc[aex, "fret_f_aa"], marker="o", linestyle="-", markersize=2, label="AA (Aex)")
+        ax.set_xlabel("time (s)")
+        ax.set_ylabel("Intensity (a.u.)")
+        ax.set_title(label + " – intensities by excitation")
+        ax.legend()
+        fig.tight_layout()
+
+        if save_plots and plot_dir is not None:
+            safe_label = f"{construct}_{exp_id}"
+            if part_col is not None:
+                safe_label += f"_p{int(longest_pid)}"
+            fig.savefig(plot_dir / f"{safe_label}_intensities.png", dpi=300)
+        if show_plots:
+            plt.show()
+        else:
+            plt.close(fig)
+
+def _pick_first_present(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+
+def compute_corrected_E_S(df: pd.DataFrame,
+                          alpha: float,
+                          delta: float,
+                          gamma: float) -> pd.DataFrame:
+    """
+    Compute corrected FRET efficiency E (Dex only) and true ALEX stoichiometry S.
+    """
+
+    required = {"fret_f_dd", "fret_f_da", "fret_f_aa", "fret_exc_type"}
+    if not required.issubset(df.columns):
+        missing = required - set(df.columns)
+        raise ValueError(f"Missing ALEX columns: {missing}")
+
+    DD = df["fret_f_dd"].astype(float).to_numpy()
+    DA = df["fret_f_da"].astype(float).to_numpy()
+    AA = df["fret_f_aa"].astype(float).to_numpy()
+
+    # Corrections
+    DA_corr = DA - alpha * DD - delta
+    DD_corr = DD
+    AA_corr = AA
+
+    # Clamp
+    DA_corr[DA_corr <= 0] = np.nan
+    DD_corr[DD_corr <= 0] = np.nan
+    AA_corr[AA_corr <= 0] = np.nan
+
+    denom_E = DA_corr + gamma * DD_corr
+    E = np.full_like(DD_corr, np.nan)
+
+    # FRET only on donor-excitation frames
+    dex = df["fret_exc_type"] == "d"
+    E[dex] = DA_corr[dex] / denom_E[dex]
+
+    # Stoichiometry (ALEX)
+    denom_S = DA_corr + gamma * DD_corr + AA_corr
+    S = (DA_corr + gamma * DD_corr) / denom_S
+    S = np.where(denom_S > 0, (DA_corr + gamma * DD_corr) / denom_S, np.nan)
+
+    out = df.copy()
+    out["E"] = E
+    out["S"] = S
+
+    return out
+
+def trim_to_prebleach(traj: pd.DataFrame,
+                      ia_col: str = "_Ia",
+                      baseline_n: int = 10,
+                      min_frac: float = 0.2,
+                      consec: int = 3) -> pd.DataFrame:
+    """
+    Find acceptor bleach as sustained drop in acceptor intensity.
+    Returns traj up to (but excluding) bleach onset.
+    """
+    x = traj[ia_col].astype(float).to_numpy()
+    if x.size < max(baseline_n, consec + 1):
+        return traj
+
+    base = np.nanmedian(x[:baseline_n])
+    if not np.isfinite(base) or base <= 0:
+        return traj
+
+    thr = min_frac * base
+    low = x < thr
+
+    # Find first index where low stays low for 'consec' consecutive points
+    run = 0
+    for i in range(low.size):
+        run = run + 1 if (low[i] and np.isfinite(x[i])) else 0
+        if run >= consec:
+            bleach_idx = i - consec + 1
+            if bleach_idx <= 0:
+                return traj.iloc[:0]  # effectively empty
+            return traj.iloc[:bleach_idx]
+
+    return traj
 
 def export_per_particle_time_series(
     data_dir: Path,
@@ -282,11 +581,24 @@ def export_per_particle_time_series(
     fret_max: float,
     key: str = "/tracks/Data",
     min_traj_length: int = 20,
+    trim_prebleach: bool = False,
+    require_S_fraction: float = 0.75,
 ) -> None:
     """
     Export per-particle time series as CSV files for downstream combination.
+
+    ALEX-correct behavior:
+      - Keep both excitation types ('d' and 'a') long enough to compute true S.
+      - Compute E only on donor-excitation frames ('d').
+      - Apply trace-level S QC using ALEX stoichiometry.
+      - Export Dex-only E(t) + S (S repeated on Dex frames; used for QC/metadata).
     """
     export_dir.mkdir(parents=True, exist_ok=True)
+
+    required_cols = {
+        "donor_frame", "fret_particle", "fret_exc_type",
+        "fret_f_dd", "fret_f_da", "fret_f_aa"
+    }
 
     for path in sorted(data_dir.glob("*.tracks*.h5")):
         fname = path.stem
@@ -299,6 +611,15 @@ def export_per_particle_time_series(
             construct = "unknown"
 
         try:
+            raw = pd.read_hdf(path, key=key)
+            if isinstance(raw.columns, pd.MultiIndex):
+                raw.columns = ["_".join([x for x in c if x]).strip() for c in raw.columns]
+
+            logger.info(
+                f"{path.name}: filter_manual value_counts:\n{raw['filter_manual'].value_counts(dropna=False) if 'filter_manual' in raw.columns else 'NO COLUMN'}")
+            logger.info(
+                f"{path.name}: fret_exc_type value_counts:\n{raw['fret_exc_type'].value_counts(dropna=False) if 'fret_exc_type' in raw.columns else 'NO COLUMN'}")
+
             df = pd.read_hdf(path, key=key)
         except Exception as e:
             logger.error(f"Could not read {path.name}: {e}")
@@ -306,47 +627,97 @@ def export_per_particle_time_series(
 
         # flatten columns
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = ["_".join(filter(None, c)).strip() for c in df.columns]
-
-        # --- NEW: restrict to donor excitation frames if available ---
-        if "fret_exc_type" in df.columns:
-            df = df[df["fret_exc_type"] == "d"]
+            df.columns = ["_".join([x for x in c if x]).strip() for c in df.columns]
 
         # ensure required columns
-        needed_cols = {"donor_frame", "fret_particle"}
-        if not needed_cols.issubset(df.columns):
-            logger.warning(f"Missing required columns in {path.name}, skipping.")
+        if not required_cols.issubset(df.columns):
+            missing = sorted(required_cols - set(df.columns))
+            logger.warning(f"Missing required columns in {path.name}: {missing}. Skipping.")
             continue
 
-        df["time_s"] = df["donor_frame"] * frame_interval
+        # time axis (use donor_frame; it exists in your schema)
+        df["time_s"] = df["donor_frame"].astype(float) * float(frame_interval)
 
-        fret_candidates = ["fret_eff", "fret_eff_app"]
-        fret_col = next((c for c in fret_candidates if c in df.columns), None)
-        if fret_col is None:
-            logger.warning(f"No FRET efficiency column found in {path.name}, skipping file.")
-            continue
+        # manual filter semantics: 1 = accepted, 0 = rejected, -1 = unlabelled
+        df = df[df["filter_manual"] != 0]
 
-        # --- FIXED: manual filter semantics ---
-        # manual == 1 means "rejected" in the original GUI
-        if "filter_manual" in df.columns:
-            df = df[df["filter_manual"] == 1]
+        # keep only ALEX-tagged rows we understand
+        df = df[df["fret_exc_type"].isin(["d", "a"])]
 
-        if "fret_exec_type" in df.columns:
-            df = df[df["fret_exec_type"] == 1]
+        # compute corrected E and true ALEX S
+        # NOTE: this assumes you replaced compute_corrected_E_S() with the ALEX-correct one:
+        # - outputs columns: "E" (Dex-only), "S"
+        df = compute_corrected_E_S(df, alpha=alpha, delta=delta, gamma=gamma)
 
-        # keep only finite, physically reasonable FRET values
-        df = df[np.isfinite(df[fret_col])]
-        df = df[(df[fret_col] > fret_min) & (df[fret_col] < fret_max)]
+        logger.info(f"{path.name}: rows after manual+exc filter = {len(df)}")
+        logger.info(
+            f"{path.name}: Dex rows = {(df['fret_exc_type'] == 'd').sum()}, Aex rows = {(df['fret_exc_type'] == 'a').sum()}")
+        logger.info(
+            f"{path.name}: finite E (Dex) = {np.isfinite(df.loc[df['fret_exc_type'] == 'd', 'E']).sum() if len(df) else 0}")
 
-        # drop short trajectories AFTER filtering
-        lengths = df.groupby("fret_particle")["donor_frame"].nunique()
-        keep = lengths[lengths >= min_traj_length].index
-        df = df[df["fret_particle"].isin(keep)]
+        if len(df) and "S" in df.columns and df["S"].notna().any():
+            logger.info(
+                f"{path.name}: S stats: min={df['S'].min(skipna=True):.3f}, "
+                f"med={df['S'].median(skipna=True):.3f}, "
+                f"max={df['S'].max(skipna=True):.3f}"
+            )
+        else:
+            logger.info(f"{path.name}: S stats: n/a (empty or all-NaN)")
 
+        plot_file_qc(df, outdir=export_dir / "plots_qc", tag=path.stem, n_particles=30)
+
+        # Point-level S window marking (do NOT drop here; use for QC + marking bad points)
+        df["_S_ok"] = (df["S"] >= S_min) & (df["S"] <= S_max)
+
+        # --- per-particle export ---
         count = 0
         for pid, traj in df.groupby("fret_particle"):
-            traj = traj.sort_values("donor_frame")
-            out = traj[["time_s", fret_col]].rename(columns={fret_col: "FRET"})
+            traj = traj.sort_values("donor_frame").copy()
+
+            # Optional: trim to pre-bleach using Aex acceptor signal (AA) if present
+            # We use fret_f_aa as the best bleach indicator in ALEX.
+            if trim_prebleach:
+                # Only Aex frames carry AA information; compute bleach onset on those frames.
+                aex = traj[traj["fret_exc_type"] == "a"].copy()
+                if aex.shape[0] >= max(BASELINE_N, BLEACH_CONSEC + 1):
+                    aex["_AA"] = aex["fret_f_aa"].astype(float)
+                    aex_trim = trim_to_prebleach(
+                        aex,
+                        ia_col="_AA",
+                        baseline_n=BASELINE_N,
+                        min_frac=BLEACH_MIN_FRAC,
+                        consec=BLEACH_CONSEC,
+                    )
+                    if aex_trim.shape[0] == 0:
+                        continue
+                    bleach_time = float(aex_trim["time_s"].max())
+                    traj = traj[traj["time_s"] <= bleach_time].copy()
+
+            # Trace-level S QC: require enough valid points within [S_min, S_max]
+            finite_S = np.isfinite(traj["S"].to_numpy())
+            if finite_S.sum() == 0:
+                continue
+
+            s_ok = (traj["S"].to_numpy() >= S_min) & (traj["S"].to_numpy() <= S_max) & finite_S
+            frac_ok = s_ok.sum() / finite_S.sum()
+            if frac_ok < require_S_fraction:
+                continue
+
+            # Now keep ONLY Dex frames for E(t)
+            dex = traj[traj["fret_exc_type"] == "d"].copy()
+
+            # E is only defined on Dex frames; enforce finite
+            dex = dex[np.isfinite(dex["E"])]
+
+            # enforce E range on Dex frames
+            dex = dex[(dex["E"] >= fret_min) & (dex["E"] <= fret_max)]
+
+            # minimum length after all filtering
+            if dex.shape[0] < min_traj_length:
+                continue
+
+            # Export: time_s, E, S (S carried along for reference/QC)
+            out = dex[["time_s", "E", "S"]].copy()
             out_name = f"{path.stem}_particle_{int(pid):05d}.csv"
             out.to_csv(export_dir / out_name, index=False)
             count += 1
@@ -355,12 +726,12 @@ def export_per_particle_time_series(
 
 
 def build_combined_fret_matrix(
-    export_dir: Path,
-    frame_interval: float,
-    fret_min: float,
-    fret_max: float,
-    use_interpolation: bool,
-    combined_out: Path | None = None,
+        export_dir: Path,
+        frame_interval: float,
+        fret_min: float,
+        fret_max: float,
+        use_interpolation: bool,
+        combined_out: Path | None = None,
 ) -> Path | None:
     """
     Combine all per-particle CSV files into a single time x trajectory matrix,
@@ -399,7 +770,8 @@ def build_combined_fret_matrix(
             continue
 
         t_trace = df["time_s"].values
-        E_trace = df["FRET"].values
+        E_trace = df["E"].values
+
         interp = interpolate_trace(time_grid, t_trace, E_trace, interpolate=use_interpolation)
 
         stem = f.stem
@@ -542,7 +914,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--plots-dir",
         type=Path,
-        default=None,
+        default="data/plots/",
         help="Directory to save plots (default: <data-dir>/plots).",
     )
     parser.add_argument(
@@ -551,6 +923,25 @@ def parse_args() -> argparse.Namespace:
         help="Do not delete per-particle CSVs after building the combined matrix.",
     )
 
+    parser.add_argument("--alpha", type=float, default=0.0, help="Leakage correction α (default: 0.0)")
+    parser.add_argument("--delta", type=float, default=0.0, help="Direct excitation δ (default: 0.0)")
+    parser.add_argument("--gamma", type=float, default=1.0, help="Gamma correction γ (default: 1.0)")
+
+    parser.add_argument("--S-min", type=float, default=0.35, help="Stoichiometry lower bound (default: 0.35)")
+    parser.add_argument("--S-max", type=float, default=0.60, help="Stoichiometry upper bound (default: 0.60)")
+
+    parser.add_argument("--trim-prebleach", action="store_true",
+                        help="Trim each trajectory to pre-bleach segment.")
+    parser.add_argument("--bleach-min-frac", type=float, default=0.20,
+                        help="Acceptor baseline fraction threshold for bleach (default: 0.20)")
+    parser.add_argument("--bleach-consec", type=int, default=3,
+                        help="Consecutive frames below threshold to call bleach (default: 3)")
+    parser.add_argument("--baseline-n", type=int, default=10,
+                        help="First N frames used for baseline (default: 10)")
+
+    parser.add_argument("--require-S-fraction", type=float, default=0.75,
+                        help="Require >= this fraction of points within [S-min,S-max] per trace (default: 0.75)")
+    
     return parser.parse_args()
 
 
@@ -560,8 +951,20 @@ def main() -> None:
     build combined matrix, and clean up.
     """
     global data_dir, export_dir, frame_interval, fret_min, fret_max, USE_INTERPOLATION
+    global alpha, delta, gamma, S_min, S_max, BLEACH_MIN_FRAC, BLEACH_CONSEC, BASELINE_N
 
     args = parse_args()
+
+    alpha = args.alpha
+    delta = args.delta
+    gamma = args.gamma
+
+    S_min = args.S_min
+    S_max = args.S_max
+
+    BLEACH_MIN_FRAC = args.bleach_min_frac
+    BLEACH_CONSEC = args.bleach_consec
+    BASELINE_N = args.baseline_n
 
     # Override globals with CLI
     data_dir = args.data_dir
@@ -603,6 +1006,8 @@ def main() -> None:
         fret_max=fret_max,
         key=key,
         min_traj_length=args.min_traj_length,
+        trim_prebleach=args.trim_prebleach,
+        require_S_fraction=args.require_S_fraction,
     )
 
     # 3) Build combined FRET matrix
@@ -614,6 +1019,8 @@ def main() -> None:
         use_interpolation=USE_INTERPOLATION,
         combined_out=export_dir / "fret_matrix.csv",
     )
+
+    plot_construct_summary(export_dir, export_dir / "plots_construct")
 
     # 4) Cleanup intermediate CSVs
     if combined_path is not None and not args.keep_intermediate:
