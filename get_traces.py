@@ -65,14 +65,15 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
 data_dir = Path("data/Hugel_2025")  # adjusted via --data-dir
 export_dir = Path("data/timeseries")  # adjusted via --export-dir
 key = "/tracks/Data"  # default key
-frame_interval = 0.07  # seconds per frame (70 ms, as in Anandamurugan et al. 2026)
+# Paper: 70ms integration + 20ms readout = 180ms per full ALEX cycle
+frame_interval = 0.18  # seconds per ALEX cycle (if donor_frame counts cycles)
 fret_max = 1.0  # max FRET efficiency to consider
 fret_min = 0.0  # min FRET efficiency to consider
 USE_INTERPOLATION = False  # Set to False - disable cubic splines/filling
-# --- correction factors (defaults; override by CLI) ---
-alpha = 0.0  # donor leakage into acceptor channel
-delta = 0.0  # direct excitation of acceptor by donor laser
-gamma = 1.0  # detection/quantum yield factor
+# --- correction factors (Based on Anandamurugan et al. 2026, Suppl. Table 6) ---
+alpha = 0.17  # Leakage (HILO)
+delta = 0.12  # Direct Excitation (HILO)
+gamma = 0.8   # Detection Efficiency (HILO)
 
 # Stoichiometry window (typical paper QC; override by CLI)
 S_min = 0.35
@@ -920,7 +921,7 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--data-dir", type=Path, default=Path("data/Hugel_2025"))
     parser.add_argument("--export-dir", type=Path, default=Path("data/timeseries"))
-    parser.add_argument("--frame-interval", type=float, default=0.07)
+    parser.add_argument("--frame-interval", type=float, default=0.18)
     parser.add_argument("--fret-min", type=float, default=0.0)
     parser.add_argument("--fret-max", type=float, default=1.0)
     parser.add_argument("--min-traj-length", type=int, default=10)
@@ -938,9 +939,9 @@ def parse_args() -> argparse.Namespace:
         help="Number of parallel worker processes (default: number of CPUs available).",
     )
 
-    parser.add_argument("--alpha", type=float, default=0.0)
-    parser.add_argument("--delta", type=float, default=0.0)
-    parser.add_argument("--gamma", type=float, default=1.0)
+    parser.add_argument("--alpha", type=float, default=0.17)
+    parser.add_argument("--delta", type=float, default=0.12)
+    parser.add_argument("--gamma", type=float, default=0.8)
 
     parser.add_argument("--S-min", type=float, default=0.35)
     parser.add_argument("--S-max", type=float, default=0.60)
@@ -1040,50 +1041,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-'''
-def compute_corrected_E_S(df: pd.DataFrame,
-                          alpha: float,
-                          delta: float,
-                          gamma: float) -> pd.DataFrame:
-    """
-    Compute corrected FRET efficiency E (Dex only) and true ALEX stoichiometry S.
-    """
-
-    required = {"fret_f_dd", "fret_f_da", "fret_f_aa", "fret_exc_type"}
-    if not required.issubset(df.columns):
-        missing = required - set(df.columns)
-        raise ValueError(f"Missing ALEX columns: {missing}")
-
-    DD = df["fret_f_dd"].astype(float).to_numpy()
-    DA = df["fret_f_da"].astype(float).to_numpy()
-    AA = df["fret_f_aa"].astype(float).to_numpy()
-
-    # Corrections
-    DA_corr = DA - alpha * DD - delta
-    DD_corr = DD
-    AA_corr = AA
-
-    # Clamp
-    DA_corr[DA_corr <= 0] = np.nan
-    DD_corr[DD_corr <= 0] = np.nan
-    AA_corr[AA_corr <= 0] = np.nan
-
-    denom_E = DA_corr + gamma * DD_corr
-    E = np.full_like(DD_corr, np.nan)
-
-    # FRET only on donor-excitation frames
-    dex = df["fret_exc_type"] == "d"
-    E[dex] = DA_corr[dex] / denom_E[dex]
-
-    # Stoichiometry (ALEX)
-    denom_S = DA_corr + gamma * DD_corr + AA_corr
-    S = (DA_corr + gamma * DD_corr) / denom_S
-    S = np.where(denom_S > 0, (DA_corr + gamma * DD_corr) / denom_S, np.nan)
-
-    out = df.copy()
-    out["E"] = E
-    out["S"] = S
-
-    return out
-'''

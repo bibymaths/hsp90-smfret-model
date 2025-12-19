@@ -1892,61 +1892,61 @@ def main():
     plot_hsp90_fit_time(t, E_mat, fit_hat, n_traces_overlay=200, condition_key="Global Fit", outdir=outdir)
     plot_residuals_over_time(t, E_mat, fit_hat, outdir)
 
-    # # per-condition fits
-    # # 1) Per coverslip/day (construct + exp_id)
-    # logger.info("[bold magenta]\n=== Per-condition fits (construct + exp_id) ===[/bold magenta]")
-    # summary_cond, fits_cond = fit_all_conditions(
-    #     t,
-    #     E_mat,
-    #     col_names,
-    #     group_by="condition",  # "<construct>_<exp_id>"
-    #     do_plots=True,
-    #     max_overlay_traces=100,
-    #     n_starts=args.multistarts,
-    #     n_jobs=args.cores,
-    # )
-    # if not summary_cond.empty:
-    #     log_df(
-    #         summary_cond.sort_values("group_key"),
-    #         title="Condition-level summary"
-    #     )
-    # else:
-    #     logger.info("[bold yellow]No condition-level fits were produced.[/bold yellow]")
-    #
-    # if not summary_cond.empty:
-    #     (outdir / "summary_conditions.csv").write_text(
-    #         summary_cond.to_csv(index=False)
-    #     )
-    #
-    # # 2) Per construct (pooling all days), if you want
-    # logger.info("[bold magenta]\n=== Per-construct fits (pool all exp_id for each construct) ===[/bold magenta]")
-    # summary_constr, fits_constr = fit_all_conditions(
-    #     t,
-    #     E_mat,
-    #     col_names,
-    #     group_by="construct",
-    #     do_plots=True,
-    #     max_overlay_traces=100,
-    #     n_starts=args.multistarts,
-    #     n_jobs=args.cores,
-    # )
-    # if not summary_constr.empty:
-    #     log_df(
-    #         summary_constr.sort_values("group_key"),
-    #         title="Construct-level summary"
-    #     )
-    # else:
-    #     logger.info("[bold yellow]No construct-level fits were produced.[/bold yellow]")
-    #
-    # if not summary_constr.empty:
-    #     (outdir / "summary_constructs.csv").write_text(
-    #         summary_constr.to_csv(index=False)
-    #     )
-    #
-    # # parameter-vs-condition plots
-    # plot_param_vs_condition(summary_cond, "k_OI", outdir)
-    # plot_param_vs_condition(summary_cond, "f_dyn", outdir)
-    # plot_param_vs_condition(summary_cond, "E_closed", outdir)
+    # per-condition fits
+    # 1) Per coverslip/day (construct + exp_id)
+    logger.info("[bold magenta]\n=== Per-condition fits (construct + exp_id) ===[/bold magenta]")
+    summary_cond, fits_cond = fit_all_conditions(
+        t,
+        E_mat,
+        col_names,
+        group_by="condition",  # "<construct>_<exp_id>"
+        do_plots=True,
+        max_overlay_traces=100,
+        n_starts=args.multistarts,
+        n_jobs=args.cores,
+    )
+    if not summary_cond.empty:
+        log_df(
+            summary_cond.sort_values("group_key"),
+            title="Condition-level summary"
+        )
+    else:
+        logger.info("[bold yellow]No condition-level fits were produced.[/bold yellow]")
+
+    if not summary_cond.empty:
+        (outdir / "summary_conditions.csv").write_text(
+            summary_cond.to_csv(index=False)
+        )
+
+    # 2) Per construct (pooling all days), if you want
+    logger.info("[bold magenta]\n=== Per-construct fits (pool all exp_id for each construct) ===[/bold magenta]")
+    summary_constr, fits_constr = fit_all_conditions(
+        t,
+        E_mat,
+        col_names,
+        group_by="construct",
+        do_plots=True,
+        max_overlay_traces=100,
+        n_starts=args.multistarts,
+        n_jobs=args.cores,
+    )
+    if not summary_constr.empty:
+        log_df(
+            summary_constr.sort_values("group_key"),
+            title="Construct-level summary"
+        )
+    else:
+        logger.info("[bold yellow]No construct-level fits were produced.[/bold yellow]")
+
+    if not summary_constr.empty:
+        (outdir / "summary_constructs.csv").write_text(
+            summary_constr.to_csv(index=False)
+        )
+
+    # parameter-vs-condition plots
+    plot_param_vs_condition(summary_cond, "k_OI", outdir)
+    plot_param_vs_condition(summary_cond, "f_dyn", outdir)
+    plot_param_vs_condition(summary_cond, "E_closed", outdir)
 
     # meta = parse_column_metadata(col_names)
     #

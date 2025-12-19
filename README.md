@@ -67,7 +67,12 @@ Download the Zenodo dataset<sup>[1]</sup> and place all .h5 tracking files into 
 ### 1. Extract & clean trajectories
 
 ```bash
-python get_traces.py --data-dir data/Hugel_2025 --export-dir data/timeseries
+python get_traces.py \
+    --alpha 0.17 \
+    --delta 0.12 \
+    --gamma 0.8 \
+    --frame-interval 0.18 \
+    --save-plots
 ```
 
 This produces:
