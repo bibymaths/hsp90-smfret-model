@@ -451,15 +451,25 @@ def _inspect_one_file(args_tuple):
 
     df = df[df["fret_exc_type"].isin(["d", "a"])].copy()
 
+    logger.info(f"Before manual filter -> rows={len(df)}")
+
     if "filter_manual" in df.columns:
+        fm = pd.to_numeric(df["filter_manual"], errors="coerce")
+
         if manual_mode == "accepted":
-            accepted_pids = df.loc[df["filter_manual"] == 1, "fret_particle"].dropna().unique()
-            df = df[df["fret_particle"].isin(accepted_pids)].copy()
-            df = df[df["filter_manual"] != 0].copy()
+            # Strict: only frames marked accepted
+            df = df[fm == 1].copy()
+
         elif manual_mode == "nonrejected":
-            df = df[df["filter_manual"] != 0].copy()
+            # Keep everything except rejected frames
+            df = df[fm != 0].copy()
+
         elif manual_mode == "all":
             pass
+        else:
+            raise ValueError(f"Unknown manual_mode: {manual_mode}")
+
+    logger.info(f"After manual filter -> rows={len(df)}")
 
     if "time_s" not in df.columns:
         if "donor_frame" in df.columns:
@@ -610,15 +620,25 @@ def _export_one_tracks_file(args_tuple):
 
     df = df[df["fret_exc_type"].isin(["d", "a"])].copy()
 
+    logger.info(f"Before manual filter -> rows={len(df)}")
+
     if "filter_manual" in df.columns:
+        fm = pd.to_numeric(df["filter_manual"], errors="coerce")
+
         if manual_mode == "accepted":
-            accepted_pids = df.loc[df["filter_manual"] == 1, "fret_particle"].dropna().unique()
-            df = df[df["fret_particle"].isin(accepted_pids)].copy()
-            df = df[df["filter_manual"] != 0].copy()
+            # Strict: only frames marked accepted
+            df = df[fm == 1].copy()
+
         elif manual_mode == "nonrejected":
-            df = df[df["filter_manual"] != 0].copy()
+            # Keep everything except rejected frames
+            df = df[fm != 0].copy()
+
         elif manual_mode == "all":
             pass
+        else:
+            raise ValueError(f"Unknown manual_mode: {manual_mode}")
+
+    logger.info(f"After manual filter -> rows={len(df)}")
 
     df = df[df["fret_exc_type"].isin(["d", "a"])]
     logger.info(f"{path.name}: after manual filter -> rows={len(df)} "

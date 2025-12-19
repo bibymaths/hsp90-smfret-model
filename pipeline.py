@@ -141,8 +141,12 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module="SALib")
 # Command-line arguments
 # -----------------------
 parser = argparse.ArgumentParser(
-    description="3-state Hsp90 FRET global fitting, sensitivity, and bootstrap."
+    description="Conformational Hsp90 FRET global fitting, sensitivity, and bootstrap."
 )
+
+parser.add_argument("--n-states", type=int, choices=[2, 3], default=2,
+                    help="Number of conformational states (2 or 3).")
+
 parser.add_argument(
     "--outdir",
     type=str,
@@ -255,6 +259,32 @@ def log_df(df: pd.DataFrame,
             logger.log(level, f"[bold cyan]{title}[/bold cyan]")
         logger.log(level, "\n" + df.to_string(index=True))
 
+@dataclass
+class Hsp90Params2State:
+    """
+    Two-state conformational model with bleaching:
+        O <-> C, each can irreversibly bleach to B with rate k_B.
+
+    Parameters
+    -------------
+
+    k_OC     : float
+
+    """
+    # Conformational rates
+    k_OC: float  # Open -> Closed (1/s)
+    k_CO: float  # Closed -> Open (1/s)
+
+    # State-dependent bleaching
+    k_BO: float  # O -> B
+    k_BC: float  # C -> B
+
+    # FRET levels
+    E_open: float
+    E_closed: float
+
+    # Initial probability (P_C0 = 1 - P_O0)
+    P_O0: float
 
 @dataclass
 class Hsp90Params3State:
@@ -317,6 +347,26 @@ class Hsp90Params3State:
     P_O0: float  # Initial Open probability
     P_C0: float  # Initial Closed probability
 
+@dataclass
+class Hsp90Fit2State:
+    """
+    Container for a full fit: kinetics + static subpopulation.
+
+    Parameters
+    ----------
+    params : Hsp90Params2State
+        Fitted kinetic parameters.
+    f_dyn : float
+        Fraction of molecules following the kinetic model.
+    E_static : float
+        FRET level of static subpopulation.
+    Returns
+    -------
+    None
+    """
+    params: Hsp90Params2State
+    f_dyn: float  # fraction of molecules following the kinetic model
+    E_static: float  # FRET level of static subpopulation
 
 @dataclass
 class Hsp90Fit3State:
@@ -372,6 +422,33 @@ def fit_to_df(fit: Hsp90Fit3State) -> pd.DataFrame:
     }
     return pd.DataFrame([row])
 
+def fit_to_df_2state(fit: Hsp90Fit2State) -> pd.DataFrame:
+    """
+    Flatten a single Hsp90Fit2State into a 1-row DataFrame.
+
+    Parameters
+    ----------
+    fit : Hsp90Fit3State
+        Fitted model.
+    Returns
+    -------
+    pd.DataFrame
+        One-row DataFrame with all fit parameters.
+    """
+    p = fit.params
+    row = {
+        "k_OC": p.k_OC,
+        "k_CO": p.k_CO,
+        "k_BO": p.k_BO,
+        "k_BC": p.k_BC,
+        "E_open": p.E_open,
+        "E_closed": p.E_closed,
+        "P_O0": p.P_O0,
+        "f_dyn": fit.f_dyn,
+        "E_static": fit.E_static,
+    }
+    return pd.DataFrame([row])
+
 @njit("Tuple((float64, float64, float64))(float64, float64, float64)", cache=True, fastmath=True, nogil=True)
 def ordered_levels(e0, d1, d2):
     """
@@ -404,6 +481,45 @@ def ordered_levels(e0, d1, d2):
     Ec = Ei + inc2
     return Eo, Ei, Ec
 
+
+@njit("float64[:](float64, float64[:], float64[:])",cache=True, fastmath=True, nogil=True)
+def rhs_hsp90_2state_numba(t, y, params):
+    k_OC, k_CO, k_BO, k_BC = params
+    P_O, P_C = y[0], y[1]
+    dP_O = -k_OC * P_O + k_CO * P_C - k_BO * P_O
+    dP_C =  k_OC * P_O - k_CO * P_C - k_BC * P_C
+    return np.array([dP_O, dP_C], dtype=np.float64)
+
+
+def model_fret_2state(t_eval: np.ndarray, p: Hsp90Params2State) -> np.ndarray:
+    P_O0 = float(np.clip(p.P_O0, 0.0, 1.0))
+    P_C0 = 1.0 - P_O0
+    y0 = np.array([P_O0, P_C0], dtype=float)
+
+    k_params = np.array([p.k_OC, p.k_CO, p.k_BO, p.k_BC], dtype=float)
+
+    sol = solve_ivp(
+        fun=rhs_hsp90_2state_numba,
+        t_span=(float(np.min(t_eval)), float(np.max(t_eval))),
+        y0=y0,
+        t_eval=t_eval,
+        vectorized=False,
+        args=(k_params,),
+    )
+    if not sol.success:
+        return np.full_like(t_eval, np.nan, dtype=float)
+
+    P = np.clip(sol.y, 0.0, 1.0)
+
+    # If numeric drift makes P_O+P_C > 1, renormalize
+    S = P.sum(axis=0)
+    bad = S > 1.0
+    if np.any(bad):
+        P[:, bad] /= S[bad]
+
+    Eo = float(np.clip(p.E_open, 0.0, 1.0))
+    Ec = float(np.clip(p.E_closed, 0.0, 1.0))
+    return Eo * P[0] + Ec * P[1]
 
 @njit("float64[:](float64, float64[:], float64[:])", cache=True, fastmath=True, nogil=True)
 def rhs_hsp90_numba(t: float, y: np.ndarray, params: np.ndarray) -> np.ndarray:
@@ -560,7 +676,13 @@ def model_total_fret(t_eval: np.ndarray, fit: Hsp90Fit3State) -> np.ndarray:
     ndarray
         Total FRET efficiency at each time point.
     """
-    E_dyn = model_fret_3state(t_eval, fit.params)
+    p = fit.params
+    if isinstance(p, Hsp90Params3State):
+        # Hsp90Params3State
+        E_dyn = model_fret_3state(t_eval, p)
+    else:
+        # Hsp90Params2State
+        E_dyn = model_fret_2state(t_eval, p)
     return fit.f_dyn * E_dyn + (1.0 - fit.f_dyn) * fit.E_static
 
 
@@ -786,37 +908,53 @@ def _fit_single_condition_worker(
     if not cols_subset:
         return None
 
-    try:
-        # 1. Subset data for this specific condition
-        t_sub, E_sub = subset_matrix_by_columns(t, E_mat, col_names, cols_subset)
+    # 1. Subset data for this specific condition
+    t_sub, E_sub = subset_matrix_by_columns(t, E_mat, col_names, cols_subset)
 
-        # 2. Perform the heavy computational fit
-        # n_job = 1 for outermost parallelism
-        # otherwise, risk for overhead subscription --> russian doll effect
+    # 2. Perform the heavy computational fit
+    # n_job = 1 for outermost parallelism
+    # otherwise, risk for overhead subscription --> russian doll effect
+    if args.n_states == 3:
         fit = fit_global_3state(t_sub, E_sub, n_starts=n_starts, n_jobs=1)
+    else:
+        fit = fit_global_2state(t_sub, E_sub, n_starts=n_starts, n_jobs=1)
 
-        # 3. Compute metrics
-        metrics = compute_ensemble_metrics(t_sub, E_sub, fit)
+    # 3. Compute metrics
+    metrics = compute_ensemble_metrics(t_sub, E_sub, fit)
 
-        # 4. Pack results into a dictionary record
-        p = fit.params
+    # 4. Pack results into a dictionary record
+    # 4. Pack results into a dictionary record
+    p = fit.params
+
+    base = dict(
+        group_by=group_by,
+        group_key=key,
+        n_traj=metrics["n_traj"],
+        n_time=metrics["n_time"],
+        rmse=metrics["rmse"],
+        r2=metrics["r2"],
+        f_dyn=fit.f_dyn,
+        E_static=fit.E_static,
+    )
+
+    if args.n_states == 3:
         rec = dict(
-            group_by=group_by,
-            group_key=key,
-            n_traj=metrics["n_traj"],
-            n_time=metrics["n_time"],
-            rmse=metrics["rmse"],
-            r2=metrics["r2"],
-            k_OI=p.k_OI, k_IO=p.k_IO, k_IC=p.k_IC, k_CI=p.k_CI, k_BO=p.k_BO, k_BI=p.k_BI, k_BC=p.k_BC,
+            **base,
+            k_OI=p.k_OI, k_IO=p.k_IO, k_IC=p.k_IC, k_CI=p.k_CI,
+            k_BO=p.k_BO, k_BI=p.k_BI, k_BC=p.k_BC,
             E_open=p.E_open, E_inter=p.E_inter, E_closed=p.E_closed,
             P_O0=p.P_O0, P_C0=p.P_C0,
-            f_dyn=fit.f_dyn, E_static=fit.E_static,
         )
-        return (key, fit, rec)
+    else:
+        rec = dict(
+            **base,
+            k_OC=p.k_OC, k_CO=p.k_CO,
+            k_BO=p.k_BO, k_BC=p.k_BC,
+            E_open=p.E_open, E_closed=p.E_closed,
+            P_O0=p.P_O0,
+        )
 
-    except Exception as e:
-        logger.info(f"  Fit failed for group '{key}': {e}")
-        return None
+    return (key, fit, rec)
 
 
 def fit_all_conditions(
@@ -885,11 +1023,17 @@ def fit_all_conditions(
 
     # Create summary DataFrame
     if not fits_list:
-        summary_df = pd.DataFrame(columns=[
-            "group_by", "group_key", "n_traj", "n_time", "rmse", "r2",
-            "k_OI", "k_IO", "k_IC", "k_CI", "k_BO", "k_BI", "k_BC",
-            "E_open", "E_inter", "E_closed", "P_O0", "P_C0", "f_dyn", "E_static"
-        ])
+        if args.n_states == 3:
+            summary_df = pd.DataFrame(columns=[
+                "group_by", "group_key", "n_traj", "n_time", "rmse", "r2",
+                "k_OI", "k_IO", "k_IC", "k_CI", "k_BO", "k_BI", "k_BC",
+                "E_open", "E_inter", "E_closed", "P_O0", "P_C0", "f_dyn", "E_static"
+            ])
+        else:
+            summary_df = pd.DataFrame(columns=[
+                "group_by", "group_key", "n_traj", "n_time", "rmse", "r2",
+                "k_OC", "k_CO", "k_BO", "k_BC", "E_open", "E_closed", "P_O0", "f_dyn", "E_static"
+            ])
     else:
         summary_df = pd.DataFrame(fits_list)
 
@@ -915,6 +1059,157 @@ def fit_all_conditions(
 # ----------------------------------------------------------------------
 # Global fitting using curve_fit (ensemble mean)
 # ----------------------------------------------------------------------
+def fret_wrapper_2s(
+        t_in,
+        k_oc, k_co, k_bo, k_bc,
+        e_o, e_c,
+        p_o0,
+        f_dyn, e_static
+):
+    params = Hsp90Params2State(
+        k_OC=k_oc, k_CO=k_co,
+        k_BO=k_bo, k_BC=k_bc,
+        E_open=e_o, E_closed=e_c,
+        P_O0=p_o0
+    )
+    fit = Hsp90Fit3State(params=params, f_dyn=f_dyn, E_static=e_static)
+    return model_total_fret(np.asarray(t_in, dtype=float), fit)
+
+def fit_global_2state(
+        t: np.ndarray,
+        E_mat: np.ndarray,
+        theta0: np.ndarray = None,
+        n_starts: int = 5,
+        n_jobs: int = 1
+) -> Hsp90Fit3State:
+    """
+    Fit 2-state O<->C + bleaching (O->B, C->B) + static mixture.
+
+    Parameters (9 total):
+      [k_OC, k_CO, k_BO, k_BC, E_open, E_closed, P_O0, f_dyn, E_static]
+    """
+
+    # --- prepare ensemble mean and sigma (same as your 3-state) ---
+    row_valid = np.isfinite(E_mat).any(axis=1)
+    t_fit = t[row_valid]
+    E_mean = np.nanmean(E_mat[row_valid, :], axis=1)
+
+    mask = np.isfinite(E_mean)
+    t_fit = t_fit[mask]
+    E_fit = E_mean[mask]
+
+    E_std_all = np.nanstd(E_mat[row_valid, :], axis=1)
+    sigma = E_std_all[mask]
+    sigma = np.where(np.isfinite(sigma) & (sigma > 1e-6), sigma, 1e-6)
+
+    if t_fit.size == 0:
+        raise RuntimeError("No valid data for 2-state fitting.")
+
+    # --- defaults ---
+    if theta0 is None:
+        # conservative guesses; keep units in 1/s
+        theta0 = np.array([
+            0.02, 0.02,      # k_OC, k_CO
+            0.005, 0.010,    # k_BO, k_BC
+            0.40, 0.75,      # E_open, E_closed
+            0.50,            # P_O0
+            0.70, 0.18       # f_dyn, E_static
+        ], dtype=float)
+
+    lower = np.array([
+        0.0, 0.0,      # k_OC, k_CO
+        0.0, 0.0,      # k_BO, k_BC
+        0.0, 0.0,      # E_open, E_closed
+        0.0,           # P_O0
+        0.0, 0.0       # f_dyn, E_static
+    ], dtype=float)
+
+    upper = np.array([
+        10.0, 10.0,    # k_OC, k_CO
+        2.0, 2.0,      # k_BO, k_BC
+        1.0, 1.0,      # E_open, E_closed
+        1.0,           # P_O0
+        1.0, 1.0       # f_dyn, E_static
+    ], dtype=float)
+
+    # --- multistart (same logic as your 3-state) ---
+    rng = np.random.default_rng(0)
+    start_configs: list[tuple[int, np.ndarray, str]] = []
+    for s in range(n_starts):
+        if s == 0:
+            theta_start = theta0.copy()
+            kind = "base"
+        else:
+            jitter = 1.0 + 0.3 * rng.normal(size=theta0.size)
+            theta_start = theta0 * jitter
+            theta_start = np.clip(theta_start, lower + 1e-8, upper - 1e-8)
+            kind = "jitter"
+        start_configs.append((s, theta_start, kind))
+
+    def _single_start_worker(cfg: tuple[int, np.ndarray, str]) -> dict:
+        s, theta_start, kind = cfg
+
+        res_obj = curve_fit(
+            fret_wrapper_2s,
+            t_fit, E_fit,
+            p0=theta_start,
+            bounds=(lower, upper),
+            sigma=sigma,
+            absolute_sigma=True,
+            maxfev=20000,
+        )
+        popt, _pcov = res_obj
+
+        E_model = fret_wrapper_2s(t_fit, *popt)
+        mask_obj = np.isfinite(E_fit) & np.isfinite(E_model)
+        if not np.any(mask_obj):
+            return {"s": s, "kind": kind, "ok": False, "msg": "no valid points", "popt": None,
+                    "cost": np.inf, "rmse": np.inf}
+
+        resid = E_fit[mask_obj] - E_model[mask_obj]
+        cost = float(np.mean(resid ** 2))
+        rmse = float(np.sqrt(cost))
+        return {"s": s, "kind": kind, "ok": True, "msg": "", "popt": popt, "cost": cost, "rmse": rmse}
+
+    results = Parallel(n_jobs=n_jobs, verbose=0)(
+        delayed(_single_start_worker)(cfg) for cfg in start_configs
+    )
+
+    best_popt = None
+    best_cost = np.inf
+    for res in results:
+        s = res["s"]
+        kind = res["kind"]
+        if not res["ok"]:
+            logger.info(f"[fit_2state] multi-start {s + 1}/{n_starts} ({kind}) failed: {res['msg']}")
+            continue
+
+        logger.info(f"[fit_2state] multi-start {s + 1}/{n_starts} ({kind}): RMSE = {res['rmse']:.6f}")
+        if res["cost"] < best_cost:
+            best_cost = res["cost"]
+            best_popt = res["popt"]
+
+    if best_popt is None:
+        raise RuntimeError("fit_global_2state: all multi-start attempts failed.")
+
+    logger.info(f"[fit_2state] selected solution with RMSE = {np.sqrt(best_cost):.6f}")
+
+    (k_oc, k_co, k_bo, k_bc,
+     e_o, e_c,
+     p_o0,
+     f_dyn, e_static) = best_popt
+
+    params = Hsp90Params2State(
+        k_OC=float(k_oc),
+        k_CO=float(k_co),
+        k_BO=float(k_bo),
+        k_BC=float(k_bc),
+        E_open=float(e_o),
+        E_closed=float(e_c),
+        P_O0=float(p_o0),
+    )
+    return Hsp90Fit3State(params=params, f_dyn=float(f_dyn), E_static=float(e_static))
+
 def fret_wrapper_3s(
         t_in,
         k_oi, k_io, k_ic, k_ci, k_bo, k_bi, k_bc,
@@ -1351,40 +1646,38 @@ def _bootstrap_worker(
     4. Pack results into a dictionary.
     -----------
     """
-    try:
-        # 1. Create a local RNG for this worker
-        rng = np.random.default_rng(seed)
+    # 1. Create a local RNG for this worker
+    rng = np.random.default_rng(seed)
 
-        # 2. Resample trajectories with replacement
-        idx_boot = rng.integers(0, E_sub.shape[1], size=E_sub.shape[1])
-        E_boot = E_sub[:, idx_boot]
+    # 2. Resample trajectories with replacement
+    idx_boot = rng.integers(0, E_sub.shape[1], size=E_sub.shape[1])
+    E_boot = E_sub[:, idx_boot]
 
-        # 3. Fit the resampled data
+    # 3. Fit the resampled data
+    fit_b = fit_global_3state(t_sub, E_boot)
+
+    # 4. Pack results
+    if args.n_states == 3:
         fit_b = fit_global_3state(t_sub, E_boot)
-
-        # 4. Pack results
         p = fit_b.params
         rec = dict(
-            k_OI=p.k_OI,
-            k_IO=p.k_IO,
-            k_IC=p.k_IC,
-            k_CI=p.k_CI,
-            k_BO=p.k_BO,
-            k_BI=p.k_BI,
-            k_BC=p.k_BC,
-            E_open=p.E_open,
-            E_inter=p.E_inter,
-            E_closed=p.E_closed,
-            P_O0=p.P_O0,
-            P_C0=p.P_C0,
-            f_dyn=fit_b.f_dyn,
-            E_static=fit_b.E_static,
+            k_OI=p.k_OI, k_IO=p.k_IO, k_IC=p.k_IC, k_CI=p.k_CI,
+            k_BO=p.k_BO, k_BI=p.k_BI, k_BC=p.k_BC,
+            E_open=p.E_open, E_inter=p.E_inter, E_closed=p.E_closed,
+            P_O0=p.P_O0, P_C0=p.P_C0,
+            f_dyn=fit_b.f_dyn, E_static=fit_b.E_static,
         )
-        return rec
-    except Exception:
-        # Fit failed for this replicate, return None
-        return None
-
+    else:
+        fit_b = fit_global_2state(t_sub, E_boot)
+        p = fit_b.params
+        rec = dict(
+            k_OC=p.k_OC, k_CO=p.k_CO,
+            k_BO=p.k_BO, k_BC=p.k_BC,
+            E_open=p.E_open, E_closed=p.E_closed,
+            P_O0=p.P_O0,
+            f_dyn=fit_b.f_dyn, E_static=fit_b.E_static,
+        )
+    return rec
 
 def bootstrap_condition_params(
         t: np.ndarray,
@@ -1764,6 +2057,13 @@ def plot_param_vs_condition(summary_df, param, outdir):
     None
     -----------
     """
+    if summary_df is None or summary_df.empty:
+        logger.info(f"Skip plot {param}: empty summary_df")
+        return
+    if param not in summary_df.columns:
+        logger.info(f"Skip plot {param}: column not in summary_df")
+        return
+
     plt.figure(figsize=(8, 8))
     plt.plot(summary_df["group_key"], summary_df[param], "o-")
     plt.xticks(rotation=90)
@@ -1883,8 +2183,13 @@ def main():
 
     # Global fit
     logger.info("[bold magenta]\n=== Global fit ===[/bold magenta]")
-    fit_hat = fit_global_3state(t, E_mat, n_starts=args.multistarts, n_jobs=args.cores)
-    df_fit_hat = fit_to_df(fit_hat)
+    if args.n_states == 3:
+        fit_hat = fit_global_3state(t, E_mat, n_starts=args.multistarts, n_jobs=args.cores)
+        df_fit_hat = fit_to_df(fit_hat)
+    else:
+        fit_hat = fit_global_2state(t, E_mat, n_starts=args.multistarts, n_jobs=args.cores)
+        df_fit_hat = fit_to_df_2state(fit_hat)
+
     log_df(df_fit_hat, title="Best-fit parameters (global)")
 
     # Global diagnostics
@@ -1944,9 +2249,15 @@ def main():
         )
 
     # parameter-vs-condition plots
-    plot_param_vs_condition(summary_cond, "k_OI", outdir)
-    plot_param_vs_condition(summary_cond, "f_dyn", outdir)
-    plot_param_vs_condition(summary_cond, "E_closed", outdir)
+    if not summary_cond.empty:
+        if args.n_states == 3:
+            plot_param_vs_condition(summary_cond, "k_OI", outdir)
+            plot_param_vs_condition(summary_cond, "f_dyn", outdir)
+            plot_param_vs_condition(summary_cond, "E_closed", outdir)
+        else:
+            plot_param_vs_condition(summary_cond, "k_OC", outdir)
+            plot_param_vs_condition(summary_cond, "f_dyn", outdir)
+            plot_param_vs_condition(summary_cond, "E_closed", outdir)
 
     # meta = parse_column_metadata(col_names)
     #
