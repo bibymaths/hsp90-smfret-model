@@ -71,9 +71,17 @@ fret_max = 1.0  # max FRET efficiency to consider
 fret_min = 0.0  # min FRET efficiency to consider
 USE_INTERPOLATION = False  # Set to False - disable cubic splines/filling
 # --- correction factors (Based on Anandamurugan et al. 2026, Suppl. Table 6) ---
-alpha = 0.17  # Leakage (HILO)
-delta = 0.12  # Direct Excitation (HILO)
-gamma = 0.8   # Detection Efficiency (HILO)
+# --- choose per acquisition mode; defaults here assume HILO) ---
+alpha = 0.17  # donor leakage into acceptor channel
+delta = 0.12  # direct excitation contribution to DA from Aex channel
+gamma = 0.8   # detection efficiency factor
+
+beta = 1.0    # stoichiometry scaling for AA (HILO often ~1); keep explicit
+
+# background offsets (estimated from post-bleach segment; default 0 if not available)
+bg_DD = 0.0
+bg_DA = 0.0
+bg_AA = 0.0
 
 # Stoichiometry window (typical paper QC; override by CLI)
 S_min = 0.35
@@ -258,7 +266,9 @@ def _pick_first_present(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 
-def compute_corrected_E_S(df: pd.DataFrame, alpha: float, delta: float, gamma: float) -> pd.DataFrame:
+def compute_corrected_E_S(df: pd.DataFrame, alpha: float, delta: float, gamma: float,
+                          bg_DD: float = 0.0, bg_DA: float = 0.0, bg_AA: float = 0.0
+                          ) -> pd.DataFrame:
     """
     Compute Dex-only E, and ALEX stoichiometry S by pairing Dex rows with nearest Aex AA.
     Requires: fret_f_dd, fret_f_da, fret_f_aa, fret_exc_type, fret_particle, donor_frame (+ acceptor_frame if present).
@@ -283,8 +293,15 @@ def compute_corrected_E_S(df: pd.DataFrame, alpha: float, delta: float, gamma: f
     DD = dex["fret_f_dd"].astype(float).to_numpy()
     DA = dex["fret_f_da"].astype(float).to_numpy()
 
-    DA_corr = DA - alpha * DD
-    DD_corr = DD
+    # DA_corr = DA - alpha * DD
+    # DD_corr = DD
+
+    # subtract backgrounds first (these should be estimated from post-bleach if possible)
+    DD0 = DD - bg_DD
+    DA0 = DA - bg_DA
+
+    DA_corr = DA0 - alpha * DD0
+    DD_corr = DD0
 
     DA_corr[DA_corr <= 0] = np.nan
     DD_corr[DD_corr <= 0] = np.nan
@@ -300,17 +317,42 @@ def compute_corrected_E_S(df: pd.DataFrame, alpha: float, delta: float, gamma: f
     dex_small = dex_small[np.isfinite(dex_small["frame"])]
     aex_small = aex_small[np.isfinite(aex_small["frame"])]
 
-    paired = pd.merge_asof(
+    # Prefer exact pairing by cycle index (robust if donor_frame is the ALEX cycle counter)
+    paired = pd.merge(
         dex_small,
         aex_small,
-        on="frame",
-        by="fret_particle",
-        direction="nearest",
-        tolerance=1.0,
-        allow_exact_matches=True,
+        on=["fret_particle", "frame"],
+        how="left",
     )
 
+    # If too many missing AA after exact merge, fall back to nearest with tight tolerance
+    missing_frac = paired["AA"].isna().mean()
+    if missing_frac > 0.10:
+        paired = pd.merge_asof(
+            dex_small.sort_values(["fret_particle", "frame"]),
+            aex_small.sort_values(["fret_particle", "frame"]),
+            on="frame",
+            by="fret_particle",
+            direction="nearest",
+            tolerance=0.25,  # << much tighter than 1.0
+            allow_exact_matches=True,
+        )
+
+    # AA = paired["AA"].to_numpy()
+    # AA[AA <= 0] = np.nan
+    #
+    # if delta != 0.0:
+    #     DA_corr = DA_corr - delta * AA
+    #     DA_corr[DA_corr <= 0] = np.nan
+    #
+    # denom_E = DA_corr + gamma * DD_corr
+    # E = np.where(denom_E > 0, DA_corr / denom_E, np.nan)
+    #
+    # denom_S = DA_corr + gamma * DD_corr + AA
+    # S = np.where(denom_S > 0, (DA_corr + gamma * DD_corr) / denom_S, np.nan)
+
     AA = paired["AA"].to_numpy()
+    AA = AA - bg_AA
     AA[AA <= 0] = np.nan
 
     if delta != 0.0:
@@ -320,7 +362,8 @@ def compute_corrected_E_S(df: pd.DataFrame, alpha: float, delta: float, gamma: f
     denom_E = DA_corr + gamma * DD_corr
     E = np.where(denom_E > 0, DA_corr / denom_E, np.nan)
 
-    denom_S = DA_corr + gamma * DD_corr + AA
+    # beta belongs here (explicit)
+    denom_S = DA_corr + gamma * DD_corr + beta * AA
     S = np.where(denom_S > 0, (DA_corr + gamma * DD_corr) / denom_S, np.nan)
 
     dex["E"] = E
@@ -333,6 +376,50 @@ def compute_corrected_E_S(df: pd.DataFrame, alpha: float, delta: float, gamma: f
     out.loc[dex.index, "S"] = dex["S"].values
 
     return out
+
+def detect_first_bleach_time(traj: pd.DataFrame, baseline_n: int, min_frac: float, consec: int) -> float | None:
+    """
+    Return time_s of the first bleaching event (donor OR acceptor), using DD and AA.
+    """
+    # Work on Dex DD and Aex AA separately
+    dex = traj[traj["fret_exc_type"] == "d"].copy()
+    aex = traj[traj["fret_exc_type"] == "a"].copy()
+
+    if dex.shape[0] < max(baseline_n, consec + 1) or aex.shape[0] < max(baseline_n, consec + 1):
+        return None
+
+    dd = dex["fret_f_dd"].astype(float).to_numpy()
+    aa = aex["fret_f_aa"].astype(float).to_numpy()
+
+    dd_base = np.nanmedian(dd[:baseline_n])
+    aa_base = np.nanmedian(aa[:baseline_n])
+    if not np.isfinite(dd_base) or dd_base <= 0 or not np.isfinite(aa_base) or aa_base <= 0:
+        return None
+
+    dd_thr = min_frac * dd_base
+    aa_thr = min_frac * aa_base
+
+    def _first_run_below(x, thr):
+        run = 0
+        for i in range(len(x)):
+            run = run + 1 if (np.isfinite(x[i]) and x[i] < thr) else 0
+            if run >= consec:
+                return i - consec + 1
+        return None
+
+    i_dd = _first_run_below(dd, dd_thr)
+    i_aa = _first_run_below(aa, aa_thr)
+
+    t_dd = float(dex.iloc[i_dd]["time_s"]) if i_dd is not None else None
+    t_aa = float(aex.iloc[i_aa]["time_s"]) if i_aa is not None else None
+
+    if t_dd is None and t_aa is None:
+        return None
+    if t_dd is None:
+        return t_aa
+    if t_aa is None:
+        return t_dd
+    return min(t_dd, t_aa)
 
 
 def trim_to_prebleach(traj: pd.DataFrame,
@@ -480,7 +567,10 @@ def _inspect_one_file(args_tuple):
 
     # Use passed correction factors
     try:
-        traj2 = compute_corrected_E_S(traj, alpha=alpha_, delta=delta_, gamma=gamma_)
+        traj2 = compute_corrected_E_S(
+            traj, alpha=alpha_, delta=delta_, gamma=gamma_, beta=beta,
+            bg_DD=bg_DD, bg_DA=bg_DA, bg_AA=bg_AA
+        )
     except Exception as e:
         logger.warning(f"Could not compute corrected E/S for plotting: {e}")
         traj2 = traj.copy()
@@ -607,6 +697,11 @@ def _export_one_tracks_file(args_tuple):
         return None
 
     df["time_s"] = df["donor_frame"].astype(float) * float(frame_interval)
+    # sanity: donor_frame spacing should look like ~1 cycle
+    df_dex = df[df["fret_exc_type"] == "d"].sort_values("donor_frame")
+    if len(df_dex) > 5:
+        step = np.nanmedian(np.diff(df_dex["donor_frame"].to_numpy()))
+        logger.info(f"{path.name}: median donor_frame step (Dex) = {step}")
 
     df = df[df["fret_exc_type"].isin(["d", "a"])].copy()
 
@@ -624,7 +719,10 @@ def _export_one_tracks_file(args_tuple):
     logger.info(f"{path.name}: after manual filter -> rows={len(df)} "
                 f"dex={(df['fret_exc_type'] == 'd').sum()} aex={(df['fret_exc_type'] == 'a').sum()}")
 
-    df = compute_corrected_E_S(df, alpha=alpha_, delta=delta_, gamma=gamma_)
+    df = compute_corrected_E_S(
+        df, alpha=alpha_, delta=delta_, gamma=gamma_, beta=beta,
+        bg_DD=bg_DD, bg_DA=bg_DA, bg_AA=bg_AA
+    )
 
     logger.info(f"{path.name}: rows after manual+exc filter = {len(df)}")
     logger.info(
@@ -652,21 +750,32 @@ def _export_one_tracks_file(args_tuple):
     for pid, traj in df.groupby("fret_particle"):
         traj = traj.sort_values("donor_frame").copy()
 
+        # if trim_prebleach:
+        #     aex = traj[traj["fret_exc_type"] == "a"].copy()
+        #     if aex.shape[0] >= max(BASELINE_N_, BLEACH_CONSEC_ + 1):
+        #         aex["_AA"] = aex["fret_f_aa"].astype(float)
+        #         aex_trim = trim_to_prebleach(
+        #             aex,
+        #             ia_col="_AA",
+        #             baseline_n=BASELINE_N_,
+        #             min_frac=BLEACH_MIN_FRAC_,
+        #             consec=BLEACH_CONSEC_,
+        #         )
+        #         if aex_trim.shape[0] == 0:
+        #             continue
+        #         bleach_time = float(aex_trim["time_s"].max())
+        #         traj = traj[traj["time_s"] <= bleach_time].copy()
+
         if trim_prebleach:
-            aex = traj[traj["fret_exc_type"] == "a"].copy()
-            if aex.shape[0] >= max(BASELINE_N_, BLEACH_CONSEC_ + 1):
-                aex["_AA"] = aex["fret_f_aa"].astype(float)
-                aex_trim = trim_to_prebleach(
-                    aex,
-                    ia_col="_AA",
-                    baseline_n=BASELINE_N_,
-                    min_frac=BLEACH_MIN_FRAC_,
-                    consec=BLEACH_CONSEC_,
-                )
-                if aex_trim.shape[0] == 0:
-                    continue
-                bleach_time = float(aex_trim["time_s"].max())
-                traj = traj[traj["time_s"] <= bleach_time].copy()
+            bt = detect_first_bleach_time(
+                traj,
+                baseline_n=BASELINE_N_,
+                min_frac=BLEACH_MIN_FRAC_,
+                consec=BLEACH_CONSEC_,
+            )
+            if bt is None:
+                continue
+            traj = traj[traj["time_s"] <= bt].copy()
 
         finite_S = np.isfinite(traj["S"].to_numpy())
         if finite_S.sum() == 0:
@@ -943,6 +1052,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delta", type=float, default=0.12)
     parser.add_argument("--gamma", type=float, default=0.8)
 
+    parser.add_argument("--bg-DD", type=float, default=0.0)
+    parser.add_argument("--bg-DA", type=float, default=0.0)
+    parser.add_argument("--bg-AA", type=float, default=0.0)
+
     parser.add_argument("--S-min", type=float, default=0.35)
     parser.add_argument("--S-max", type=float, default=0.60)
 
@@ -961,12 +1074,17 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     global data_dir, export_dir, frame_interval, fret_min, fret_max, USE_INTERPOLATION
     global alpha, delta, gamma, S_min, S_max, BLEACH_MIN_FRAC, BLEACH_CONSEC, BASELINE_N
+    global alpha, delta, gamma, beta, bg_DD, bg_DA, bg_AA
 
     args = parse_args()
 
     alpha = args.alpha
     delta = args.delta
     gamma = args.gamma
+
+    bg_DD = args.bg_DD
+    bg_DA = args.bg_DA
+    bg_AA = args.bg_AA
 
     S_min = args.S_min
     S_max = args.S_max
