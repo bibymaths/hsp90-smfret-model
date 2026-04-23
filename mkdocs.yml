@@ -1,0 +1,50 @@
+site_name: smFRET Kinetic Model
+site_description: Three-state OIC kinetic model for single-molecule FRET data
+repo_url: https://github.com/abhinavmishra/hsp90-smfret-model
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.code.annotate
+    - content.tabs.link
+plugins:
+  - search
+  - autorefs
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: true
+            docstring_style: numpy
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.arithmatex:
+      generic: true
+  - attr_list
+  - md_in_html
+extra_javascript:
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+nav:
+  - Home: index.md
+  - Overview: overview.md
+  - Mathematical Model: math.md
+  - Usage: usage.md
+  - API Reference: api.md
+  - Contributing: contributing.md

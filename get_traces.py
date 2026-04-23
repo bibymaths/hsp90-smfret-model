@@ -43,7 +43,6 @@ SPDX-License-Identifier: CC-BY-4.0
 # It is designed to inspect raw data, filter and export individual particle
 # trajectories, and combine them into a unified time-series matrix.
 
-
 import argparse
 import logging
 import warnings
@@ -61,13 +60,13 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
 
 # === Global configuration (overridden by CLI in main) ===
-data_dir = Path("data/Hugel_2025")   # adjusted via --data-dir
-export_dir = Path("data/timeseries") # adjusted via --export-dir
-key = "/tracks/Data"                 # default key
-frame_interval = 0.07                # seconds per frame (70 ms, as in Anandamurugan et al. 2026)
-fret_max = 1.0                       # max FRET efficiency to consider
-fret_min = 0.0                       # min FRET efficiency to consider
-USE_INTERPOLATION = False            # Set to False - disable cubic splines/filling
+data_dir = Path("data/Hugel_2025")  # adjusted via --data-dir
+export_dir = Path("data/timeseries")  # adjusted via --export-dir
+key = "/tracks/Data"  # default key
+frame_interval = 0.07  # seconds per frame (70 ms, as in Anandamurugan et al. 2026)
+fret_max = 1.0  # max FRET efficiency to consider
+fret_min = 0.0  # min FRET efficiency to consider
+USE_INTERPOLATION = False  # Set to False - disable cubic splines/filling
 
 
 def interpolate_trace(
@@ -292,11 +291,10 @@ def export_per_particle_time_series(
         fname = path.stem
         parts = fname.split("-")
         if len(parts) >= 3:
-            exp_id = parts[1]
-            construct = parts[2].split(".")[0]
+            parts[1]
+            parts[2].split(".")[0]
         else:
-            exp_id = "unknown"
-            construct = "unknown"
+            pass
 
         try:
             df = pd.read_hdf(path, key=key)
@@ -323,7 +321,9 @@ def export_per_particle_time_series(
         fret_candidates = ["fret_eff", "fret_eff_app"]
         fret_col = next((c for c in fret_candidates if c in df.columns), None)
         if fret_col is None:
-            logger.warning(f"No FRET efficiency column found in {path.name}, skipping file.")
+            logger.warning(
+                f"No FRET efficiency column found in {path.name}, skipping file."
+            )
             continue
 
         # --- FIXED: manual filter semantics ---
@@ -351,7 +351,9 @@ def export_per_particle_time_series(
             out.to_csv(export_dir / out_name, index=False)
             count += 1
 
-        logger.info(f"Exported {count} per-particle traces from {path.name} to {export_dir}/")
+        logger.info(
+            f"Exported {count} per-particle traces from {path.name} to {export_dir}/"
+        )
 
 
 def build_combined_fret_matrix(
@@ -393,14 +395,16 @@ def build_combined_fret_matrix(
     # Collect all interpolated traces first
     columns: dict[str, np.ndarray] = {"time_s": time_grid}
 
-    for i, f in enumerate(csv_files):
+    for _i, f in enumerate(csv_files):
         df = pd.read_csv(f)
         if len(df) == 0:
             continue
 
         t_trace = df["time_s"].values
         E_trace = df["FRET"].values
-        interp = interpolate_trace(time_grid, t_trace, E_trace, interpolate=use_interpolation)
+        interp = interpolate_trace(
+            time_grid, t_trace, E_trace, interpolate=use_interpolation
+        )
 
         stem = f.stem
         parts = stem.split("-")
@@ -465,7 +469,9 @@ def build_combined_fret_matrix(
     return combined_out
 
 
-def cleanup_intermediate_csv(export_dir: Path, combined_name: str = "fret_matrix.csv") -> None:
+def cleanup_intermediate_csv(
+    export_dir: Path, combined_name: str = "fret_matrix.csv"
+) -> None:
     """
     Remove all per-particle CSVs except the combined matrix.
     """
