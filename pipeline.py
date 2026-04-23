@@ -1567,6 +1567,9 @@ def plot_bootstrap_errorbars_all_conditions(
     2. Create error bar plot of mean ± 95% CI across conditions.
     -----------
     """
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
     df = boot_summary[boot_summary["param"] == param].copy()
     if df.empty:
         logger.info(f"No bootstrap summary for param={param}")

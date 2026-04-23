@@ -86,6 +86,88 @@ def test_bootstrap_shape(fret_matrix: pd.DataFrame) -> None:
     assert len(boot) <= 3
 
 
+def test_subset_matrix_and_metrics(fret_matrix: pd.DataFrame) -> None:
+    t = np.linspace(0, 5, len(fret_matrix))
+    col_names = [f"constructA_241107_p{i:05d}" for i in range(1, 4)]
+    t_sub, e_sub = pipeline.subset_matrix_by_columns(
+        t=t,
+        E_mat=fret_matrix.to_numpy(),
+        col_names=col_names,
+        cols_subset=col_names[:2],
+    )
+    assert t_sub.shape[0] == e_sub.shape[0]
+    assert e_sub.shape[1] == 2
+
+    params = pipeline.Hsp90Params3State(
+        k_OI=0.2,
+        k_IO=0.15,
+        k_IC=0.3,
+        k_CI=0.25,
+        k_BO=0.02,
+        k_BI=0.03,
+        k_BC=0.04,
+        E_open=0.2,
+        E_inter=0.5,
+        E_closed=0.8,
+        P_O0=0.5,
+        P_C0=0.2,
+    )
+    fit = pipeline.Hsp90Fit3State(params=params, f_dyn=0.7, E_static=0.2)
+    metrics = pipeline.compute_ensemble_metrics(t_sub, e_sub, fit)
+    assert metrics["n_traj"] == 2
+    assert np.isfinite(metrics["rmse"])
+    assert np.isfinite(metrics["r2"])
+
+
+def test_fit_single_condition_worker_paths(
+    fret_matrix: pd.DataFrame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    t = np.linspace(0, 5, len(fret_matrix))
+    col_names = [f"constructA_241107_p{i:05d}" for i in range(1, 4)]
+    meta = pipeline.parse_column_metadata(col_names)
+
+    params = pipeline.Hsp90Params3State(
+        k_OI=0.2,
+        k_IO=0.15,
+        k_IC=0.3,
+        k_CI=0.25,
+        k_BO=0.02,
+        k_BI=0.03,
+        k_BC=0.04,
+        E_open=0.2,
+        E_inter=0.5,
+        E_closed=0.8,
+        P_O0=0.5,
+        P_C0=0.2,
+    )
+    fit = pipeline.Hsp90Fit3State(params=params, f_dyn=0.7, E_static=0.2)
+    monkeypatch.setattr(pipeline, "fit_global_3state", lambda *args, **kwargs: fit)
+
+    ok = pipeline._fit_single_condition_worker(
+        key=meta["condition"].iloc[0],
+        t=t,
+        E_mat=fret_matrix.to_numpy(),
+        col_names=col_names,
+        meta=meta,
+        group_by="condition",
+        n_starts=1,
+        n_jobs=1,
+    )
+    assert ok is not None
+
+    none_res = pipeline._fit_single_condition_worker(
+        key="missing_key",
+        t=t,
+        E_mat=fret_matrix.to_numpy(),
+        col_names=col_names,
+        meta=meta,
+        group_by="condition",
+        n_starts=1,
+        n_jobs=1,
+    )
+    assert none_res is None
+
+
 def test_sobol_indices_sum_leq_one(fret_matrix: pd.DataFrame) -> None:
     t = np.linspace(0, 5, len(fret_matrix))
     bounds = {"k_OI": (0.01, 1.0), "k_IO": (0.01, 1.0), "f_dyn": (0.1, 0.9)}
@@ -273,3 +355,22 @@ def test_bootstrap_plot_and_compare_helpers(tmp_path: Path) -> None:
 
     assert (tmp_path / "bootstrap_ci_k_OI.png").exists()
     assert (tmp_path / "bootstrap_compare_k_OI.png").exists()
+
+
+def test_bootstrap_plot_accepts_string_outdir(tmp_path: Path) -> None:
+    outdir = tmp_path / "results"
+    boot_summary = pd.DataFrame(
+        {
+            "group_key": ["g1"],
+            "param": ["k_OI"],
+            "mean": [0.2],
+            "lo": [0.1],
+            "hi": [0.3],
+        }
+    )
+    pipeline.plot_bootstrap_errorbars_all_conditions(
+        boot_summary=boot_summary,
+        param="k_OI",
+        outdir=str(outdir),
+    )
+    assert (outdir / "bootstrap_ci_k_OI.png").exists()

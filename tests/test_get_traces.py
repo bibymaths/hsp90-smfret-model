@@ -77,6 +77,41 @@ def test_interpolate_trace_cleans_nans_and_bounds() -> None:
     assert out[3] == pytest.approx(0.6)
 
 
+def test_interpolate_trace_empty_and_single_point() -> None:
+    time_grid = np.array([0.0, 0.1, 0.2])
+    out_empty = get_traces.interpolate_trace(
+        time_grid=time_grid,
+        t_trace=np.array([]),
+        E_trace=np.array([]),
+        interpolate=True,
+    )
+    assert np.isnan(out_empty).all()
+
+    out_single = get_traces.interpolate_trace(
+        time_grid=time_grid,
+        t_trace=np.array([0.1]),
+        E_trace=np.array([0.7]),
+        interpolate=True,
+    )
+    assert np.isnan(out_single[0])
+    assert out_single[1] == pytest.approx(0.7)
+    assert np.isnan(out_single[2])
+
+
+def test_interpolate_trace_linear_and_out_of_bounds_nan() -> None:
+    time_grid = np.array([0.0, 0.1, 0.2, 0.3])
+    out = get_traces.interpolate_trace(
+        time_grid=time_grid,
+        t_trace=np.array([0.1, 0.2]),
+        E_trace=np.array([0.25, 0.75]),
+        interpolate=True,
+    )
+    assert np.isnan(out[0])
+    assert out[1] == pytest.approx(0.25)
+    assert out[2] == pytest.approx(0.75)
+    assert np.isnan(out[3])
+
+
 def test_parse_args(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "sys.argv",
@@ -111,3 +146,18 @@ def test_main_entrypoint(
     get_traces.main()
     assert (tmp_path / "fret_matrix.csv").exists()
     assert any((tmp_data_dir / "plots").glob("*.png"))
+
+
+def test_cleanup_intermediate_csv(tmp_path: Path) -> None:
+    export_dir = tmp_path / "timeseries"
+    export_dir.mkdir()
+    (export_dir / "trace_1.csv").write_text("time_s,FRET\n0.0,0.2\n")
+    (export_dir / "trace_2.csv").write_text("time_s,FRET\n0.1,0.3\n")
+    combined = export_dir / "fret_matrix.csv"
+    combined.write_text("time_s,traj\n0.0,0.2\n")
+
+    get_traces.cleanup_intermediate_csv(export_dir, combined_name=combined.name)
+
+    assert combined.exists()
+    assert not (export_dir / "trace_1.csv").exists()
+    assert not (export_dir / "trace_2.csv").exists()
