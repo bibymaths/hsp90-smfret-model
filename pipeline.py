@@ -1,5 +1,4 @@
 #! /usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 # SPDX-License-Identifier: BSD-3-Clause
 # SPDX-FileCopyrightText: 2025 Abhinav Mishra
@@ -117,22 +116,24 @@ import shutil
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, List, Optional, cast
+from typing import TYPE_CHECKING, cast
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from SALib.analyze import sobol
-from SALib.sample import saltelli
 from joblib import Parallel, delayed
 from numba import njit
 from numpy.typing import NDArray
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.theme import Theme
+from SALib.analyze import sobol
+from SALib.sample import saltelli
 from scipy.integrate import solve_ivp
-from scipy.integrate._ivp.ivp import OdeResult
 from scipy.optimize import curve_fit
+
+if TYPE_CHECKING:
+    from scipy.integrate._ivp.ivp import OdeResult
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="SALib")
 
@@ -167,7 +168,7 @@ parser.add_argument(
     help="Number of CPU cores for Joblib parallel sections (default: %(default)s)",
 )
 
-args = parser.parse_args()
+args, _unknown_args = parser.parse_known_args()
 
 # -----------------------
 # Results directory
@@ -178,14 +179,16 @@ outdir.mkdir(parents=True, exist_ok=True)
 # -----------------------
 # Rich logging setup
 # -----------------------
-custom_theme = Theme({
-    "log.time": "dim cyan",
-    "log.level.debug": "dim",
-    "log.level.info": "bold white",
-    "log.level.warning": "bold yellow",
-    "log.level.error": "bold red",
-    "log.level.critical": "bold white on red",
-})
+custom_theme = Theme(
+    {
+        "log.time": "dim cyan",
+        "log.level.debug": "dim",
+        "log.level.info": "bold white",
+        "log.level.warning": "bold yellow",
+        "log.level.error": "bold red",
+        "log.level.critical": "bold white on red",
+    }
+)
 
 term_width = shutil.get_terminal_size(fallback=(220, 24)).columns
 
@@ -216,10 +219,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def log_df(df: pd.DataFrame,
-           title: str | None = None,
-           level: int = logging.INFO,
-           max_rows: int = 60) -> None:
+def log_df(
+    df: pd.DataFrame,
+    title: str | None = None,
+    level: int = logging.INFO,
+    max_rows: int = 60,
+) -> None:
     """
     Log a DataFrame to the rich logger with optional title and row limit.
 
@@ -246,9 +251,12 @@ def log_df(df: pd.DataFrame,
         df = df.head(max_rows)
 
     with pd.option_context(
-            "display.width", console.width,
-            "display.max_columns", None,
-            "display.max_colwidth", console.width,
+        "display.width",
+        console.width,
+        "display.max_columns",
+        None,
+        "display.max_colwidth",
+        console.width,
     ):
         if title:
             logger.log(level, f"[bold cyan]{title}[/bold cyan]")
@@ -296,6 +304,7 @@ class Hsp90Params3State:
     None
 
     """
+
     # Conformational rates
     k_OI: float  # Open -> Intermediate rate (1/s)
     k_IO: float  # Intermediate -> Open rate (1/s)
@@ -334,6 +343,7 @@ class Hsp90Fit3State:
     -------
     None
     """
+
     params: Hsp90Params3State
     f_dyn: float  # fraction of molecules following the kinetic model
     E_static: float  # FRET level of static subpopulation
@@ -404,7 +414,12 @@ def ordered_levels(e0, d1, d2):
     return Eo, Ei, Ec
 
 
-@njit("float64[:](float64, float64[:], float64[:])", cache=True, fastmath=True, nogil=False)
+@njit(
+    "float64[:](float64, float64[:], float64[:])",
+    cache=True,
+    fastmath=True,
+    nogil=False,
+)
 def rhs_hsp90_numba(t: float, y: np.ndarray, params: np.ndarray) -> np.ndarray:
     """
     Numba-optimized ODE for P_O, P_I, P_C with bleaching.
@@ -470,20 +485,24 @@ def model_fret_3state(t_eval: np.ndarray, p: Hsp90Params3State) -> np.ndarray:
 
     # kinetic parameters (already box-constrained in the fit)
     k_params = np.array(
-        [p.k_OI, p.k_IO, p.k_IC, p.k_CI, p.k_BO, p.k_BI, p.k_BC],
-        dtype=float
+        [p.k_OI, p.k_IO, p.k_IC, p.k_CI, p.k_BO, p.k_BI, p.k_BC], dtype=float
     )
 
-    sol = cast(OdeResult, cast(object, solve_ivp(
-        fun=rhs_hsp90_numba,
-        t_span=(t_eval.min(), t_eval.max()),
-        y0=y0,
-        t_eval=t_eval,
-        vectorized=False,
-        args=(k_params,),
-        # method='RK45',
+    sol = cast(
+        "OdeResult",
+        cast(
+            "object",
+            solve_ivp(
+                fun=rhs_hsp90_numba,
+                t_span=(t_eval.min(), t_eval.max()),
+                y0=y0,
+                t_eval=t_eval,
+                vectorized=False,
+                args=(k_params,),
+                # method='RK45',
+            ),
+        ),
     )
-                               ))
 
     if not sol.success:
         return np.full_like(t_eval, np.nan, dtype=float)
@@ -506,11 +525,7 @@ def model_fret_3state(t_eval: np.ndarray, p: Hsp90Params3State) -> np.ndarray:
     E_inter = np.clip(p.E_inter, 0.0, 1.0)
     E_closed = np.clip(p.E_closed, 0.0, 1.0)
 
-    E_t = (
-            E_open * P_O_t +
-            E_inter * P_I_t +
-            E_closed * P_C_t
-    )
+    E_t = E_open * P_O_t + E_inter * P_I_t + E_closed * P_C_t
     return E_t
 
 
@@ -537,7 +552,8 @@ def model_total_fret(t_eval: np.ndarray, fit: Hsp90Fit3State) -> np.ndarray:
 # Data loading
 # ----------------------------------------------------------------------
 
-def load_combined_matrix(path: Path) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+
+def load_combined_matrix(path: Path) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """
     Load combined_fret_matrix CSV file into time grid and FRET matrix.
 
@@ -569,7 +585,7 @@ def load_combined_matrix(path: Path) -> Tuple[np.ndarray, np.ndarray, List[str]]
     return t, E_mat, traj_cols
 
 
-def parse_column_metadata(col_names: List[str]) -> pd.DataFrame:
+def parse_column_metadata(col_names: list[str]) -> pd.DataFrame:
     """
     Parse combined_fret_matrix trajectory column names into a metadata DataFrame.
 
@@ -608,18 +624,14 @@ def parse_column_metadata(col_names: List[str]) -> pd.DataFrame:
         records.append((c, construct, exp_id, particle, condition))
 
     meta = pd.DataFrame(
-        records,
-        columns=["col", "construct", "exp_id", "particle", "condition"]
+        records, columns=["col", "construct", "exp_id", "particle", "condition"]
     )
     return meta
 
 
 def subset_matrix_by_columns(
-        t: np.ndarray,
-        E_mat: np.ndarray,
-        all_cols: List[str],
-        cols_subset: List[str]
-) -> Tuple[np.ndarray, np.ndarray]:
+    t: np.ndarray, E_mat: np.ndarray, all_cols: list[str], cols_subset: list[str]
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Given the full time grid and matrix, extract a sub-matrix restricted to
     a subset of trajectory columns, and remove rows where all subset entries are NaN.
@@ -656,9 +668,7 @@ def subset_matrix_by_columns(
 
 
 def compute_ensemble_metrics(
-        t: np.ndarray,
-        E_mat: np.ndarray,
-        fit: Hsp90Fit3State
+    t: np.ndarray, E_mat: np.ndarray, fit: Hsp90Fit3State
 ) -> dict:
     """
     Compute ensemble RMSE and R^2 for a given condition and fitted model.
@@ -691,7 +701,7 @@ def compute_ensemble_metrics(
     E_plot = E_mat[row_valid, :]
 
     if t_plot.size == 0:
-        return dict(rmse=np.nan, r2=np.nan, n_time=0, n_traj=0)
+        return {"rmse": np.nan, "r2": np.nan, "n_time": 0, "n_traj": 0}
 
     E_mean = np.nanmean(E_plot, axis=1)
     E_model = model_total_fret(t_plot, fit)
@@ -701,32 +711,32 @@ def compute_ensemble_metrics(
     E_mod = E_model[mask]
 
     if E_obs.size == 0:
-        return dict(rmse=np.nan, r2=np.nan, n_time=0, n_traj=E_plot.shape[1])
+        return {"rmse": np.nan, "r2": np.nan, "n_time": 0, "n_traj": E_plot.shape[1]}
 
     residuals = E_obs - E_mod
-    rmse = np.sqrt(np.mean(residuals ** 2))
-    ss_res = np.sum(residuals ** 2)
+    rmse = np.sqrt(np.mean(residuals**2))
+    ss_res = np.sum(residuals**2)
     ss_tot = np.sum((E_obs - E_obs.mean()) ** 2)
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
 
-    return dict(
-        rmse=float(rmse),
-        r2=float(r2),
-        n_time=int(len(E_obs)),
-        n_traj=int(E_mat.shape[1]),
-    )
+    return {
+        "rmse": float(rmse),
+        "r2": float(r2),
+        "n_time": int(len(E_obs)),
+        "n_traj": int(E_mat.shape[1]),
+    }
 
 
 def _fit_single_condition_worker(
-        key: str,
-        t: np.ndarray,
-        E_mat: np.ndarray,
-        col_names: List[str],
-        meta: pd.DataFrame,
-        group_by: str,
-        n_starts: int,
-        n_jobs: int
-) -> Optional[Tuple[str, Hsp90Fit3State, dict]]:
+    key: str,
+    t: np.ndarray,
+    E_mat: np.ndarray,
+    col_names: list[str],
+    meta: pd.DataFrame,
+    group_by: str,
+    n_starts: int,
+    n_jobs: int,
+) -> tuple[str, Hsp90Fit3State, dict] | None:
     """
     Internal worker for parallel fitting of a single condition.
 
@@ -767,18 +777,28 @@ def _fit_single_condition_worker(
 
         # 4. Pack results into a dictionary record
         p = fit.params
-        rec = dict(
-            group_by=group_by,
-            group_key=key,
-            n_traj=metrics["n_traj"],
-            n_time=metrics["n_time"],
-            rmse=metrics["rmse"],
-            r2=metrics["r2"],
-            k_OI=p.k_OI, k_IO=p.k_IO, k_IC=p.k_IC, k_CI=p.k_CI, k_BO=p.k_BO, k_BI=p.k_BI, k_BC=p.k_BC,
-            E_open=p.E_open, E_inter=p.E_inter, E_closed=p.E_closed,
-            P_O0=p.P_O0, P_C0=p.P_C0,
-            f_dyn=fit.f_dyn, E_static=fit.E_static,
-        )
+        rec = {
+            "group_by": group_by,
+            "group_key": key,
+            "n_traj": metrics["n_traj"],
+            "n_time": metrics["n_time"],
+            "rmse": metrics["rmse"],
+            "r2": metrics["r2"],
+            "k_OI": p.k_OI,
+            "k_IO": p.k_IO,
+            "k_IC": p.k_IC,
+            "k_CI": p.k_CI,
+            "k_BO": p.k_BO,
+            "k_BI": p.k_BI,
+            "k_BC": p.k_BC,
+            "E_open": p.E_open,
+            "E_inter": p.E_inter,
+            "E_closed": p.E_closed,
+            "P_O0": p.P_O0,
+            "P_C0": p.P_C0,
+            "f_dyn": fit.f_dyn,
+            "E_static": fit.E_static,
+        }
         return (key, fit, rec)
 
     except Exception as e:
@@ -787,15 +807,15 @@ def _fit_single_condition_worker(
 
 
 def fit_all_conditions(
-        t: np.ndarray,
-        E_mat: np.ndarray,
-        col_names: List[str],
-        group_by: str = "condition",
-        do_plots: bool = False,
-        max_overlay_traces: int = 100,
-        n_starts: int = 5,
-        n_jobs: int = 4,
-) -> Tuple[pd.DataFrame, dict]:
+    t: np.ndarray,
+    E_mat: np.ndarray,
+    col_names: list[str],
+    group_by: str = "condition",
+    do_plots: bool = False,
+    max_overlay_traces: int = 100,
+    n_starts: int = 5,
+    n_jobs: int = 4,
+) -> tuple[pd.DataFrame, dict]:
     """
     Fit the 3-state+bleaching+static model separately for each condition.
 
@@ -826,7 +846,9 @@ def fit_all_conditions(
     """
     meta = parse_column_metadata(col_names)
     if group_by not in meta.columns:
-        raise ValueError(f"group_by must be one of {', '.join(['condition', 'construct', 'exp_id'])}")
+        raise ValueError(
+            f"group_by must be one of {', '.join(['condition', 'construct', 'exp_id'])}"
+        )
 
     group_keys = sorted(meta[group_by].unique())
     logger.info(f"Starting parallel fit for {len(group_keys)} groups...")
@@ -837,7 +859,8 @@ def fit_all_conditions(
     results = Parallel(n_jobs=n_jobs, verbose=0)(
         delayed(_fit_single_condition_worker)(
             key, t, E_mat, col_names, meta, group_by, n_starts, n_jobs
-        ) for key in group_keys
+        )
+        for key in group_keys
     )
     # ------------------------
 
@@ -852,11 +875,30 @@ def fit_all_conditions(
 
     # Create summary DataFrame
     if not fits_list:
-        summary_df = pd.DataFrame(columns=[
-            "group_by", "group_key", "n_traj", "n_time", "rmse", "r2",
-            "k_OI", "k_IO", "k_IC", "k_CI", "k_BO", "k_BI", "k_BC",
-            "E_open", "E_inter", "E_closed", "P_O0", "P_C0", "f_dyn", "E_static"
-        ])
+        summary_df = pd.DataFrame(
+            columns=[
+                "group_by",
+                "group_key",
+                "n_traj",
+                "n_time",
+                "rmse",
+                "r2",
+                "k_OI",
+                "k_IO",
+                "k_IC",
+                "k_CI",
+                "k_BO",
+                "k_BI",
+                "k_BC",
+                "E_open",
+                "E_inter",
+                "E_closed",
+                "P_O0",
+                "P_C0",
+                "f_dyn",
+                "E_static",
+            ]
+        )
     else:
         summary_df = pd.DataFrame(fits_list)
 
@@ -870,10 +912,12 @@ def fit_all_conditions(
             t_sub, E_sub = subset_matrix_by_columns(t, E_mat, col_names, cols)
 
             plot_hsp90_fit_time(
-                t_sub, E_sub, fit_dict[key],
+                t_sub,
+                E_sub,
+                fit_dict[key],
                 n_traces_overlay=max_overlay_traces,
                 random_seed=0,
-                condition_key=key
+                condition_key=key,
             )
 
     return summary_df, fit_dict
@@ -883,12 +927,13 @@ def fit_all_conditions(
 # Global fitting using curve_fit (ensemble mean)
 # ----------------------------------------------------------------------
 
+
 def fit_global_3state(
-        t: np.ndarray,
-        E_mat: np.ndarray,
-        theta0: np.ndarray = None,
-        n_starts: int = 5,
-        n_jobs: int = 1
+    t: np.ndarray,
+    E_mat: np.ndarray,
+    theta0: np.ndarray = None,
+    n_starts: int = 5,
+    n_jobs: int = 1,
 ) -> Hsp90Fit3State:
     """
     Fit the 3-state + bleaching model plus static fraction to the ensemble mean.
@@ -937,42 +982,96 @@ def fit_global_3state(
 
     # 14 parameters: 7 rates + 3 FRET + 2 initials + 2 static
     if theta0 is None:
-        theta0 = np.array([
-            0.01, 0.01, 0.01, 0.01,  # k_OI, k_IO, k_IC, k_CI
-            0.003, 0.006, 0.012,  # k_BO, k_BI, k_BC
-            0.4, 0.5, 0.7,  # E_open, E_inter, E_closed (rough guesses)
-            0.35, 0.55,  # P_O0, P_C0
-            0.7, 0.18  # f_dyn, E_static
-        ], dtype=float)
+        theta0 = np.array(
+            [
+                0.01,
+                0.01,
+                0.01,
+                0.01,  # k_OI, k_IO, k_IC, k_CI
+                0.003,
+                0.006,
+                0.012,  # k_BO, k_BI, k_BC
+                0.4,
+                0.5,
+                0.7,  # E_open, E_inter, E_closed (rough guesses)
+                0.35,
+                0.55,  # P_O0, P_C0
+                0.7,
+                0.18,  # f_dyn, E_static
+            ],
+            dtype=float,
+        )
 
-    lower = np.array([
-        0.0, 0.0, 0.0, 0.0,  # rates
-        0.0, 0.0, 0.0,  # bleaching
-        0.0, 0.0, 0.0,  # FRET in [0,1]
-        0.0, 0.0,  # P_O0, P_C0
-        0.0, 0.0  # f_dyn, E_static
-    ], dtype=float)
+    lower = np.array(
+        [
+            0.0,
+            0.0,
+            0.0,
+            0.0,  # rates
+            0.0,
+            0.0,
+            0.0,  # bleaching
+            0.0,
+            0.0,
+            0.0,  # FRET in [0,1]
+            0.0,
+            0.0,  # P_O0, P_C0
+            0.0,
+            0.0,  # f_dyn, E_static
+        ],
+        dtype=float,
+    )
 
-    upper = np.array([
-        10.0, 10.0, 10.0, 10.0,
-        2.0, 2.0, 2.0,  # bleaching slower-ish
-        1.0, 1.0, 1.0,  # FRET ≤ 1
-        1.0, 1.0,
-        1.0, 1.0
-    ], dtype=float)
+    upper = np.array(
+        [
+            10.0,
+            10.0,
+            10.0,
+            10.0,
+            2.0,
+            2.0,
+            2.0,  # bleaching slower-ish
+            1.0,
+            1.0,
+            1.0,  # FRET ≤ 1
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+        ],
+        dtype=float,
+    )
 
     def fret_wrapper_3s(
-            t_in,
-            k_oi, k_io, k_ic, k_ci, k_bo, k_bi, k_bc,
-            e_o, e_i, e_c,
-            p_o0, p_c0,
-            f_dyn, e_static
-    ):
+        t_in: NDArray[np.float64],
+        k_oi: float,
+        k_io: float,
+        k_ic: float,
+        k_ci: float,
+        k_bo: float,
+        k_bi: float,
+        k_bc: float,
+        e_o: float,
+        e_i: float,
+        e_c: float,
+        p_o0: float,
+        p_c0: float,
+        f_dyn: float,
+        e_static: float,
+    ) -> NDArray[np.float64]:
         params = Hsp90Params3State(
-            k_OI=k_oi, k_IO=k_io, k_IC=k_ic, k_CI=k_ci,
-            k_BO=k_bo, k_BI=k_bi, k_BC=k_bc,
-            E_open=e_o, E_inter=e_i, E_closed=e_c,
-            P_O0=p_o0, P_C0=p_c0
+            k_OI=k_oi,
+            k_IO=k_io,
+            k_IC=k_ic,
+            k_CI=k_ci,
+            k_BO=k_bo,
+            k_BI=k_bi,
+            k_BC=k_bc,
+            E_open=e_o,
+            E_inter=e_i,
+            E_closed=e_c,
+            P_O0=p_o0,
+            P_C0=p_c0,
         )
         E_dyn = model_fret_3state(t_in, params)
         return f_dyn * E_dyn + (1.0 - f_dyn) * e_static
@@ -1010,18 +1109,21 @@ def fit_global_3state(
         """
         s, theta_start, kind = cfg
         try:
-            res_obj = cast(object, curve_fit(
-                fret_wrapper_3s,
-                t_fit, E_fit,
-                p0=theta_start,
-                bounds=(lower, upper),
-                sigma=sigma,
-                absolute_sigma=False,
-                maxfev=20000,
-            ))
+            res_obj = cast(
+                "object",
+                curve_fit(
+                    fret_wrapper_3s,
+                    t_fit,
+                    E_fit,
+                    p0=theta_start,
+                    bounds=(lower, upper),
+                    sigma=sigma,
+                    absolute_sigma=False,
+                    maxfev=20000,
+                ),
+            )
             popt, pcov = cast(
-                Tuple[NDArray[np.float64], NDArray[np.float64]],
-                res_obj
+                "tuple[NDArray[np.float64], NDArray[np.float64]]", res_obj
             )
         except Exception as e:
             return {
@@ -1049,7 +1151,7 @@ def fit_global_3state(
             }
 
         resid = E_fit[mask_obj] - E_model[mask_obj]
-        cost = float(np.mean(resid ** 2))
+        cost = float(np.mean(resid**2))
         rmse = float(np.sqrt(cost))
 
         return {
@@ -1067,7 +1169,7 @@ def fit_global_3state(
     )
 
     # Select best result
-    best_popt: Optional[NDArray[np.float64]] = None
+    best_popt: NDArray[np.float64] | None = None
     best_cost = np.inf
 
     for res in results:
@@ -1075,7 +1177,9 @@ def fit_global_3state(
         kind = res["kind"]
         if not res["ok"]:
             msg = res["msg"]
-            logger.info(f"[fit_3state] multi-start {s + 1}/{n_starts} ({kind}) failed: {msg}")
+            logger.info(
+                f"[fit_3state] multi-start {s + 1}/{n_starts} ({kind}) failed: {msg}"
+            )
             continue
 
         cost = res["cost"]
@@ -1094,11 +1198,22 @@ def fit_global_3state(
     logger.info(f"[fit_3state] selected solution with RMSE = {np.sqrt(best_cost):.6f}")
     popt = best_popt
 
-    (k_oi, k_io, k_ic, k_ci,
-     k_bo, k_bi, k_bc,
-     e_o, e_i, e_c,
-     p_o0, p_c0,
-     f_dyn, e_static) = popt
+    (
+        k_oi,
+        k_io,
+        k_ic,
+        k_ci,
+        k_bo,
+        k_bi,
+        k_bc,
+        e_o,
+        e_i,
+        e_c,
+        p_o0,
+        p_c0,
+        f_dyn,
+        e_static,
+    ) = popt
 
     params = Hsp90Params3State(
         k_OI=float(k_oi),
@@ -1115,19 +1230,17 @@ def fit_global_3state(
         P_C0=float(p_c0),
     )
 
-    return Hsp90Fit3State(params=params,
-                          f_dyn=float(f_dyn),
-                          E_static=float(e_static))
+    return Hsp90Fit3State(params=params, f_dyn=float(f_dyn), E_static=float(e_static))
 
 
 # ----------------------------------------------------------------------
 # Diagnostics / plotting
 # ----------------------------------------------------------------------
 
-def plot_ensemble_fit(t: np.ndarray,
-                      E_mat: np.ndarray,
-                      fit: Hsp90Fit3State,
-                      outdir: Path) -> None:
+
+def plot_ensemble_fit(
+    t: np.ndarray, E_mat: np.ndarray, fit: Hsp90Fit3State, outdir: Path
+) -> None:
     """
     Goodness-of-fit plot based on ensemble-averaged FRET.
     Plots mean observed FRET vs model FRET at each time point.
@@ -1160,7 +1273,7 @@ def plot_ensemble_fit(t: np.ndarray,
         raise RuntimeError("No valid time points for ensemble fit plot.")
 
     E_mean = np.nanmean(E_plot, axis=1)
-    E_std = np.nanstd(E_plot, axis=1)
+    np.nanstd(E_plot, axis=1)
 
     E_model = model_total_fret(t_plot, fit)
 
@@ -1172,8 +1285,8 @@ def plot_ensemble_fit(t: np.ndarray,
         raise RuntimeError("No valid (mean, model) pairs for goodness-of-fit plot.")
 
     residuals = E_obs - E_mod
-    rmse = np.sqrt(np.mean(residuals ** 2))
-    ss_res = np.sum(residuals ** 2)
+    rmse = np.sqrt(np.mean(residuals**2))
+    ss_res = np.sum(residuals**2)
     ss_tot = np.sum((E_obs - E_obs.mean()) ** 2)
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else np.nan
 
@@ -1194,8 +1307,7 @@ def plot_ensemble_fit(t: np.ndarray,
     plt.xlabel("Model FRET (ensemble)")
     plt.ylabel("Observed FRET (ensemble mean)")
     plt.title(
-        "Goodness of fit (ensemble mean vs model)\n"
-        f"RMSE = {rmse:.4f}, R^2 = {r2:.4f}"
+        f"Goodness of fit (ensemble mean vs model)\nRMSE = {rmse:.4f}, R^2 = {r2:.4f}"
     )
     plt.xlim(lo, hi)
     plt.ylim(lo, hi)
@@ -1208,13 +1320,13 @@ def plot_ensemble_fit(t: np.ndarray,
 
 
 def plot_hsp90_fit_time(
-        t: np.ndarray,
-        E_mat: np.ndarray,
-        fit: Hsp90Fit3State,
-        n_traces_overlay: int = 200,
-        random_seed: int = 0,
-        condition_key: str | None = None,
-        outdir: Path = outdir
+    t: np.ndarray,
+    E_mat: np.ndarray,
+    fit: Hsp90Fit3State,
+    n_traces_overlay: int = 200,
+    random_seed: int = 0,
+    condition_key: str | None = None,
+    outdir: Path = outdir,
 ) -> None:
     """
     Plot Hsp90 3-state + bleaching + static fraction vs data across time.
@@ -1291,11 +1403,7 @@ def plot_hsp90_fit_time(
     plt.close()
 
 
-def _bootstrap_worker(
-        t_sub: np.ndarray,
-        E_sub: np.ndarray,
-        seed: int
-) -> Optional[dict]:
+def _bootstrap_worker(t_sub: np.ndarray, E_sub: np.ndarray, seed: int) -> dict | None:
     """
     Internal worker for a single bootstrap resample and fit.
 
@@ -1331,22 +1439,22 @@ def _bootstrap_worker(
 
         # 4. Pack results
         p = fit_b.params
-        rec = dict(
-            k_OI=p.k_OI,
-            k_IO=p.k_IO,
-            k_IC=p.k_IC,
-            k_CI=p.k_CI,
-            k_BO=p.k_BO,
-            k_BI=p.k_BI,
-            k_BC=p.k_BC,
-            E_open=p.E_open,
-            E_inter=p.E_inter,
-            E_closed=p.E_closed,
-            P_O0=p.P_O0,
-            P_C0=p.P_C0,
-            f_dyn=fit_b.f_dyn,
-            E_static=fit_b.E_static,
-        )
+        rec = {
+            "k_OI": p.k_OI,
+            "k_IO": p.k_IO,
+            "k_IC": p.k_IC,
+            "k_CI": p.k_CI,
+            "k_BO": p.k_BO,
+            "k_BI": p.k_BI,
+            "k_BC": p.k_BC,
+            "E_open": p.E_open,
+            "E_inter": p.E_inter,
+            "E_closed": p.E_closed,
+            "P_O0": p.P_O0,
+            "P_C0": p.P_C0,
+            "f_dyn": fit_b.f_dyn,
+            "E_static": fit_b.E_static,
+        }
         return rec
     except Exception:
         # Fit failed for this replicate, return None
@@ -1354,15 +1462,15 @@ def _bootstrap_worker(
 
 
 def bootstrap_condition_params(
-        t: np.ndarray,
-        E_mat: np.ndarray,
-        col_names: list[str],
-        meta: pd.DataFrame,
-        group_key: str,
-        group_by: str = "condition",
-        n_boot: int = 100,
-        random_seed: int = 0,
-        n_jobs: int = 4,
+    t: np.ndarray,
+    E_mat: np.ndarray,
+    col_names: list[str],
+    meta: pd.DataFrame,
+    group_key: str,
+    group_by: str = "condition",
+    n_boot: int = 100,
+    random_seed: int = 0,
+    n_jobs: int = 4,
 ) -> pd.DataFrame:
     """
     Perform bootstrap resampling and fitting for a single condition.
@@ -1418,8 +1526,7 @@ def bootstrap_condition_params(
     # and iterate over the unique seeds.
     # verbose=5 will show a progress bar
     results = Parallel(n_jobs=n_jobs, verbose=0)(
-        delayed(_bootstrap_worker)(t_sub, E_sub, random_seed + b)
-        for b in range(n_boot)
+        delayed(_bootstrap_worker)(t_sub, E_sub, random_seed + b) for b in range(n_boot)
     )
     # ------------------------
 
@@ -1434,10 +1541,10 @@ def bootstrap_condition_params(
 
 
 def plot_bootstrap_errorbars_all_conditions(
-        boot_summary: pd.DataFrame,
-        param: str,
-        title_suffix: str = "",
-        outdir: Path = outdir,
+    boot_summary: pd.DataFrame,
+    param: str,
+    title_suffix: str = "",
+    outdir: Path = outdir,
 ) -> None:
     """
     Plot bootstrap 95% confidence intervals for a given parameter across all conditions.
@@ -1491,11 +1598,11 @@ def plot_bootstrap_errorbars_all_conditions(
 
 
 def sobol_sensitivity_3state(
-        t: np.ndarray,
-        E_mat: np.ndarray,
-        param_bounds: dict[str, tuple[float, float]],
-        n_base_samples: int = 512,
-        n_jobs: int = 1,
+    t: np.ndarray,
+    E_mat: np.ndarray,
+    param_bounds: dict[str, tuple[float, float]],
+    n_base_samples: int = 512,
+    n_jobs: int = 1,
 ) -> dict:
     """
     Perform Sobol sensitivity analysis on the 3-state + bleaching + static model.
@@ -1553,17 +1660,13 @@ def sobol_sensitivity_3state(
     }
 
     # ---- 3. Generate samples --------------------------------
-    param_values = saltelli.sample(
-        problem,
-        N=n_base_samples,
-        calc_second_order=True
-    )
+    param_values = saltelli.sample(problem, N=n_base_samples, calc_second_order=True)
 
     # ---- 4. Evaluate model for each sample -------
 
     def _eval_one(theta: np.ndarray) -> float:
         # Map sample vector -> parameter dict
-        p_dict = dict(zip(names, theta))
+        p_dict = dict(zip(names, theta, strict=False))
 
         # Defaults if not varied
         k_OI = p_dict.get("k_OI", 0.08)
@@ -1586,10 +1689,18 @@ def sobol_sensitivity_3state(
         E_static = p_dict.get("E_static", 0.2)
 
         params = Hsp90Params3State(
-            k_OI=k_OI, k_IO=k_IO, k_IC=k_IC, k_CI=k_CI,
-            k_BO=k_BO, k_BI=k_BI, k_BC=k_BC,
-            E_open=E_open, E_inter=E_inter, E_closed=E_closed,
-            P_O0=P_O0, P_C0=P_C0,
+            k_OI=k_OI,
+            k_IO=k_IO,
+            k_IC=k_IC,
+            k_CI=k_CI,
+            k_BO=k_BO,
+            k_BI=k_BI,
+            k_BC=k_BC,
+            E_open=E_open,
+            E_inter=E_inter,
+            E_closed=E_closed,
+            P_O0=P_O0,
+            P_C0=P_C0,
         )
 
         fit = Hsp90Fit3State(params=params, f_dyn=f_dyn, E_static=E_static)
@@ -1601,7 +1712,7 @@ def sobol_sensitivity_3state(
                 return np.nan
 
             r = E_fit[mask_obj] - E_model[mask_obj]
-            rmse = np.sqrt(np.mean(r ** 2))
+            rmse = np.sqrt(np.mean(r**2))
             return float(rmse)
         except Exception:
             return np.nan
@@ -1631,7 +1742,7 @@ def sobol_sensitivity_3state(
         calc_second_order=True,
         print_to_console=False,
         parallel=True,
-        n_processors=n_jobs
+        n_processors=n_jobs,
     )
 
     # Attach parameter names for convenience
@@ -1640,15 +1751,15 @@ def sobol_sensitivity_3state(
 
 
 def sobol_sensitivity_for_group(
-        t: np.ndarray,
-        E_mat: np.ndarray,
-        col_names: list[str],
-        meta: pd.DataFrame,
-        group_key: str,
-        group_by: str,
-        param_bounds: dict[str, tuple[float, float]],
-        n_base_samples: int = 512,
-        n_jobs: int = 1
+    t: np.ndarray,
+    E_mat: np.ndarray,
+    col_names: list[str],
+    meta: pd.DataFrame,
+    group_key: str,
+    group_by: str,
+    param_bounds: dict[str, tuple[float, float]],
+    n_base_samples: int = 512,
+    n_jobs: int = 1,
 ) -> pd.DataFrame:
     """
     Perform Sobol sensitivity analysis for a specific group/condition.
@@ -1689,32 +1800,36 @@ def sobol_sensitivity_for_group(
     # subset matrix
     t_sub, E_sub = subset_matrix_by_columns(t, E_mat, col_names, cols_subset)
 
-    logger.info(f"Running Sobol SA for {group_by}={group_key}, "
-                f"{E_sub.shape[1]} traj, {E_sub.shape[0]} time points")
+    logger.info(
+        f"Running Sobol SA for {group_by}={group_key}, "
+        f"{E_sub.shape[1]} traj, {E_sub.shape[0]} time points"
+    )
 
     Si = sobol_sensitivity_3state(
         t_sub,
         E_sub,
         param_bounds=param_bounds,
         n_base_samples=n_base_samples,
-        n_jobs=n_jobs
+        n_jobs=n_jobs,
     )
 
     # pack into a nice DataFrame
-    df_sa = pd.DataFrame({
-        "param": Si["names"],
-        "S1": Si["S1"],
-        "S1_conf": Si["S1_conf"],
-        "ST": Si["ST"],
-        "ST_conf": Si["ST_conf"],
-    })
+    df_sa = pd.DataFrame(
+        {
+            "param": Si["names"],
+            "S1": Si["S1"],
+            "S1_conf": Si["S1_conf"],
+            "ST": Si["ST"],
+            "ST_conf": Si["ST_conf"],
+        }
+    )
     df_sa.insert(0, "group_key", group_key)
     df_sa.insert(0, "group_by", group_by)
 
     return df_sa
 
 
-def plot_param_vs_condition(summary_df, param, outdir):
+def plot_param_vs_condition(summary_df, param, outdir) -> None:
     """
     Plot a fitted parameter vs condition.
 
@@ -1763,7 +1878,7 @@ def summarize_bootstrap(boot_df, name):
     return mean, lo, hi
 
 
-def plot_bootstrap_compare(boot_A, boot_B, param, label_A, label_B, outdir):
+def plot_bootstrap_compare(boot_A, boot_B, param, label_A, label_B, outdir) -> None:
     """
     Plot comparison of bootstrap distributions for a given parameter.
 
@@ -1801,7 +1916,7 @@ def plot_bootstrap_compare(boot_A, boot_B, param, label_A, label_B, outdir):
     plt.close()
 
 
-def plot_residuals_over_time(t, E_mat, fit, outdir):
+def plot_residuals_over_time(t, E_mat, fit, outdir) -> None:
     """
     Plot residuals (mean data - model) over time for ensemble fit.
 
@@ -1840,28 +1955,50 @@ def plot_residuals_over_time(t, E_mat, fit, outdir):
 # ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
-def main():
+def main() -> None:
+    """Run the full smFRET kinetic analysis workflow.
+
+    The routine loads the combined trajectory matrix, performs global and grouped
+    model fitting, generates diagnostic plots, computes Sobol sensitivity indices,
+    and runs bootstrap summaries for conditions and constructs.
+
+    Returns
+    -------
+    None
+    """
     logger.info(f"[bold green]Using outdir:[/bold green] {outdir.resolve()}")
 
     combined_path = Path("data/timeseries/fret_matrix.csv")
     t, E_mat, col_names = load_combined_matrix(combined_path)
 
-    logger.info(f"Loaded combined matrix: {E_mat.shape[0]} time points, {E_mat.shape[1]} trajectories")
+    logger.info(
+        f"Loaded combined matrix: {E_mat.shape[0]} time points, {E_mat.shape[1]} trajectories"
+    )
 
     # Global fit
     logger.info("[bold magenta]\n=== Global fit ===[/bold magenta]")
     fit_hat = fit_global_3state(t, E_mat, n_starts=args.multistarts, n_jobs=args.cores)
     df_fit_hat = fit_to_df(fit_hat)
     log_df(df_fit_hat, title="Best-fit parameters (global)")
+    df_fit_hat.to_csv(outdir / "best_params.csv", index=False)
 
     # Global diagnostics
     plot_ensemble_fit(t, E_mat, fit_hat, outdir)
-    plot_hsp90_fit_time(t, E_mat, fit_hat, n_traces_overlay=200, condition_key="Global Fit", outdir=outdir)
+    plot_hsp90_fit_time(
+        t,
+        E_mat,
+        fit_hat,
+        n_traces_overlay=200,
+        condition_key="Global Fit",
+        outdir=outdir,
+    )
     plot_residuals_over_time(t, E_mat, fit_hat, outdir)
 
     # per-condition fits
     # 1) Per coverslip/day (construct + exp_id)
-    logger.info("[bold magenta]\n=== Per-condition fits (construct + exp_id) ===[/bold magenta]")
+    logger.info(
+        "[bold magenta]\n=== Per-condition fits (construct + exp_id) ===[/bold magenta]"
+    )
     summary_cond, fits_cond = fit_all_conditions(
         t,
         E_mat,
@@ -1873,20 +2010,17 @@ def main():
         n_jobs=args.cores,
     )
     if not summary_cond.empty:
-        log_df(
-            summary_cond.sort_values("group_key"),
-            title="Condition-level summary"
-        )
+        log_df(summary_cond.sort_values("group_key"), title="Condition-level summary")
     else:
         logger.info("[bold yellow]No condition-level fits were produced.[/bold yellow]")
 
     if not summary_cond.empty:
-        (outdir / "summary_conditions.csv").write_text(
-            summary_cond.to_csv(index=False)
-        )
+        (outdir / "summary_conditions.csv").write_text(summary_cond.to_csv(index=False))
 
     # 2) Per construct (pooling all days), if you want
-    logger.info("[bold magenta]\n=== Per-construct fits (pool all exp_id for each construct) ===[/bold magenta]")
+    logger.info(
+        "[bold magenta]\n=== Per-construct fits (pool all exp_id for each construct) ===[/bold magenta]"
+    )
     summary_constr, fits_constr = fit_all_conditions(
         t,
         E_mat,
@@ -1898,10 +2032,7 @@ def main():
         n_jobs=args.cores,
     )
     if not summary_constr.empty:
-        log_df(
-            summary_constr.sort_values("group_key"),
-            title="Construct-level summary"
-        )
+        log_df(summary_constr.sort_values("group_key"), title="Construct-level summary")
     else:
         logger.info("[bold yellow]No construct-level fits were produced.[/bold yellow]")
 
@@ -1922,39 +2053,34 @@ def main():
         "k_IO": (0.0, 10.0),
         "k_IC": (0.0, 10.0),
         "k_CI": (0.0, 10.0),
-
         "k_BO": (0.0, 2.0),
         "k_BI": (0.0, 2.0),
         "k_BC": (0.0, 2.0),
-
         "E_open": (0.0, 1.0),
         "E_inter": (0.0, 1.0),
         "E_closed": (0.0, 1.0),
-
         "P_O0": (0.0, 1.0),
         "P_C0": (0.0, 1.0),
-
         "f_dyn": (0.0, 1.0),
         "E_static": (0.0, 1.0),
     }
 
     Si = sobol_sensitivity_3state(
-        t,
-        E_mat,
-        param_bounds,
-        n_base_samples=512,
-        n_jobs=args.cores
+        t, E_mat, param_bounds, n_base_samples=512, n_jobs=args.cores
     )
 
     # Inspect first-order and total-order indices as a table
-    df_sobol = pd.DataFrame({
-        "param": Si["names"],
-        "S1": Si["S1"],
-        "S1_conf": Si["S1_conf"],
-        "ST": Si["ST"],
-        "ST_conf": Si["ST_conf"],
-    })
+    df_sobol = pd.DataFrame(
+        {
+            "param": Si["names"],
+            "S1": Si["S1"],
+            "S1_conf": Si["S1_conf"],
+            "ST": Si["ST"],
+            "ST_conf": Si["ST_conf"],
+        }
+    )
     log_df(df_sobol, title="Global Sobol sensitivity (all trajectories)")
+    df_sobol.to_csv(outdir / "sobol_indices.csv", index=False)
 
     # === Sobol sensitivity per condition ==============================
     sa_cond_list: list[pd.DataFrame] = []
@@ -1970,7 +2096,7 @@ def main():
                 group_by="condition",
                 param_bounds=param_bounds,
                 n_base_samples=256,
-                n_jobs=args.cores
+                n_jobs=args.cores,
             )
             sa_cond_list.append(df_sa)
         except Exception as e:
@@ -1998,7 +2124,7 @@ def main():
                 group_by="construct",
                 param_bounds=param_bounds,
                 n_base_samples=256,
-                n_jobs=args.cores
+                n_jobs=args.cores,
             )
             sa_constr_list.append(df_sa)
         except Exception as e:
@@ -2051,21 +2177,23 @@ def main():
                 continue
             m, lo, hi = summarize_bootstrap(boot_df, p)
             boot_records.append(
-                dict(
-                    group_key=key,
-                    param=p,
-                    mean=m,
-                    lo=lo,
-                    hi=hi,
-                    n_boot=len(boot_df),
-                )
+                {
+                    "group_key": key,
+                    "param": p,
+                    "mean": m,
+                    "lo": lo,
+                    "hi": hi,
+                    "n_boot": len(boot_df),
+                }
             )
 
     if not boot_records:
         logger.info("No bootstrap summaries computed.")
     else:
         boot_summary = pd.DataFrame(boot_records)
-        log_df(boot_summary, title="Bootstrap summary (mean ± 95% CI per condition/param)")
+        log_df(
+            boot_summary, title="Bootstrap summary (mean ± 95% CI per condition/param)"
+        )
 
         if not boot_summary.empty:
             (outdir / "bootstrap_summary_conditions.csv").write_text(
@@ -2079,6 +2207,13 @@ def main():
                 param=p,
                 title_suffix=" (condition-level)",
             )
+
+    if boot_raw:
+        boot_all = pd.concat(
+            [df.assign(group_key=key) for key, df in boot_raw.items()],
+            ignore_index=True,
+        )
+        boot_all.to_csv(outdir / "bootstrap_distributions.csv", index=False)
 
     # === Bootstrap for ALL constructs ================================
     logger.info("\n=== Bootstrap parameter uncertainty per construct ===")
@@ -2115,22 +2250,25 @@ def main():
                 continue
             m, lo, hi = summarize_bootstrap(boot_df, p)
             boot_records_constr.append(
-                dict(
-                    group_type="construct",
-                    group_key=key,
-                    param=p,
-                    mean=m,
-                    lo=lo,
-                    hi=hi,
-                    n_boot=len(boot_df),
-                )
+                {
+                    "group_type": "construct",
+                    "group_key": key,
+                    "param": p,
+                    "mean": m,
+                    "lo": lo,
+                    "hi": hi,
+                    "n_boot": len(boot_df),
+                }
             )
 
     if not boot_records_constr:
         logger.info("No bootstrap summaries computed for constructs.")
     else:
         boot_summary_constr = pd.DataFrame(boot_records_constr)
-        log_df(boot_summary_constr, title="Bootstrap summary (mean ± 95% CI per construct/param)")
+        log_df(
+            boot_summary_constr,
+            title="Bootstrap summary (mean ± 95% CI per construct/param)",
+        )
 
         if not boot_summary_constr.empty:
             (outdir / "bootstrap_summary_constructs.csv").write_text(
