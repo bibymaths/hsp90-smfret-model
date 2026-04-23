@@ -5,11 +5,11 @@ Three-state OIC kinetic model for single-molecule FRET data with bleaching-aware
 [![Code License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](../LICENSE)
 [![Figures & Plots License: CC BY 4.0](https://img.shields.io/badge/License-CC--BY--4.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
 [![Python >=3.11](https://img.shields.io/badge/Python-%3E%3D3.11-blue.svg)](https://www.python.org/)
-[![codecov](https://codecov.io/gh/abhinavmishra/hsp90-smfret-model/branch/main/graph/badge.svg)](https://codecov.io/gh/abhinavmishra/hsp90-smfret-model)
+[![codecov](https://codecov.io/gh/bibymaths/hsp90-smfret-model/branch/main/graph/badge.svg)](https://codecov.io/gh/bibymaths/hsp90-smfret-model)
 
 <div style="display:flex;gap:24px;align-items:center;">
   <img src="images/logo.png" alt="Project logo" width="42%" />
-  <img src="images/flow.png" alt="OIC state model" width="42%" />
+  <img src="images/structure.png" alt="HSP90 Structure" width="42%" />
 </div>
 
 ## Quick start
