@@ -8,8 +8,8 @@ Three-state OIC kinetic model for single-molecule FRET data with bleaching-aware
 [![codecov](https://codecov.io/gh/bibymaths/hsp90-smfret-model/branch/main/graph/badge.svg)](https://codecov.io/gh/bibymaths/hsp90-smfret-model)
 
 <div style="display:flex;gap:24px;align-items:center;">
-  <img src="images/logo.png" alt="Project logo" width="42%" />
-  <img src="images/structure.png" alt="HSP90 Structure" width="42%" />
+  <img src="images/logo.png" alt="Project logo" width="45%" />
+  <img src="images/structure.png" alt="HSP90 Structure" width="30%" />
 </div>
 
 ## Quick start

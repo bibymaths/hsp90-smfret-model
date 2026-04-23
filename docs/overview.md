@@ -4,7 +4,10 @@ smFRET reports nanometer-scale donor/acceptor distance changes in single molecul
 
 ## State topology
 
-![OIC state diagram](images/flow.png)
+<div align="center">
+  <img src="images/flow.png" alt="Model Diagram" width="60%"/>
+</div>
+
 
 ## Dynamic + static mixture
 
