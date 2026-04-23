@@ -56,14 +56,16 @@ def fitted_params() -> dict[str, float]:
 
 
 @pytest.fixture
-def rate_matrix_fixture(fitted_params: dict[str, float]) -> np.ndarray:
-    p = fitted_params
-    return np.array(
+def rate_matrix_fixture() -> np.ndarray:
+    """Valid 4x4 generator matrix: O↔I↔C, with bleaching from O/I/C."""
+    q_mat = np.array(
         [
-            [-(p["k_OI"] + p["k_BO"]), p["k_IO"], 0.0, 0.0],
-            [p["k_OI"], -(p["k_IO"] + p["k_IC"] + p["k_BI"]), p["k_CI"], 0.0],
-            [0.0, p["k_IC"], -(p["k_CI"] + p["k_BC"]), 0.0],
-            [p["k_BO"], p["k_BI"], p["k_BC"], 0.0],
+            [0.0, 0.20, 0.00, 0.02],
+            [0.15, 0.00, 0.30, 0.03],
+            [0.00, 0.25, 0.00, 0.04],
+            [0.00, 0.00, 0.00, 0.00],
         ],
         dtype=float,
     )
+    np.fill_diagonal(q_mat, -q_mat.sum(axis=1))
+    return q_mat

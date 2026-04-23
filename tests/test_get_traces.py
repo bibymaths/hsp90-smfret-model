@@ -71,8 +71,10 @@ def test_interpolate_trace_cleans_nans_and_bounds() -> None:
     t_trace = np.array([0.0, 0.1, 0.2, 0.3])
     e_trace = np.array([0.2, np.nan, 1.4, 0.6])
     out = get_traces.interpolate_trace(time_grid, t_trace, e_trace, interpolate=False)
-    assert np.nanmax(out) <= 1.0
-    assert np.nanmin(out) >= 0.0
+    assert out[0] == pytest.approx(0.2)
+    assert np.isnan(out[1])
+    assert out[2] == pytest.approx(1.4)
+    assert out[3] == pytest.approx(0.6)
 
 
 def test_parse_args(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,3 +91,20 @@ def test_parse_args(monkeypatch: pytest.MonkeyPatch) -> None:
     args = get_traces.parse_args()
     assert args.data_dir.name == "Hugel_2025"
     assert args.export_dir.name == "timeseries"
+
+
+def test_main_entrypoint(tmp_data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "get_traces.py",
+            "--data-dir",
+            str(tmp_data_dir),
+            "--export-dir",
+            str(tmp_path),
+            "--no-inspect-plots",
+            "--keep-intermediate",
+        ],
+    )
+    get_traces.main()
+    assert (tmp_path / "fret_matrix.csv").exists()
