@@ -128,7 +128,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.theme import Theme
 from SALib.analyze import sobol
-from SALib.sample import saltelli
+from SALib.sample import sobol as sobol_sample
 from scipy.integrate import solve_ivp
 from scipy.optimize import curve_fit
 
@@ -1567,6 +1567,9 @@ def plot_bootstrap_errorbars_all_conditions(
     2. Create error bar plot of mean ± 95% CI across conditions.
     -----------
     """
+    outdir = Path(outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
     df = boot_summary[boot_summary["param"] == param].copy()
     if df.empty:
         logger.info(f"No bootstrap summary for param={param}")
@@ -1660,7 +1663,9 @@ def sobol_sensitivity_3state(
     }
 
     # ---- 3. Generate samples --------------------------------
-    param_values = saltelli.sample(problem, N=n_base_samples, calc_second_order=True)
+    param_values = sobol_sample.sample(
+        problem, N=n_base_samples, calc_second_order=True
+    )
 
     # ---- 4. Evaluate model for each sample -------
 
