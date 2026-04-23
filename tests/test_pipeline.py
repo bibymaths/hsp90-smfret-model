@@ -72,18 +72,36 @@ def test_bootstrap_shape(fret_matrix: pd.DataFrame) -> None:
     t = np.linspace(0, 5, len(fret_matrix))
     col_names = [f"construct_241107_p{i:05d}" for i in range(3)]
     meta = pipeline.parse_column_metadata(col_names)
-    boot = pipeline.bootstrap_condition_params(
-        t=t,
-        E_mat=fret_matrix.to_numpy(),
-        col_names=col_names,
-        meta=meta,
-        group_key=meta["condition"].iloc[0],
-        group_by="condition",
-        n_boot=3,
-        random_seed=1,
-        n_jobs=1,
+    params = pipeline.Hsp90Params3State(
+        k_OI=0.2,
+        k_IO=0.15,
+        k_IC=0.3,
+        k_CI=0.25,
+        k_BO=0.02,
+        k_BI=0.03,
+        k_BC=0.04,
+        E_open=0.2,
+        E_inter=0.5,
+        E_closed=0.8,
+        P_O0=0.5,
+        P_C0=0.2,
     )
-    assert len(boot) <= 3
+    fit_stub = pipeline.Hsp90Fit3State(params=params, f_dyn=0.7, E_static=0.2)
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(pipeline, "fit_global_3state", lambda *args, **kwargs: fit_stub)
+        boot = pipeline.bootstrap_condition_params(
+            t=t,
+            E_mat=fret_matrix.to_numpy(),
+            col_names=col_names,
+            meta=meta,
+            group_key=meta["condition"].iloc[0],
+            group_by="condition",
+            n_boot=3,
+            random_seed=1,
+            n_jobs=1,
+        )
+    assert isinstance(boot, pd.DataFrame)
+    assert len(boot) == 3
 
 
 def test_subset_matrix_and_metrics(fret_matrix: pd.DataFrame) -> None:
@@ -92,7 +110,7 @@ def test_subset_matrix_and_metrics(fret_matrix: pd.DataFrame) -> None:
     t_sub, e_sub = pipeline.subset_matrix_by_columns(
         t=t,
         E_mat=fret_matrix.to_numpy(),
-        col_names=col_names,
+        all_cols=col_names,
         cols_subset=col_names[:2],
     )
     assert t_sub.shape[0] == e_sub.shape[0]
