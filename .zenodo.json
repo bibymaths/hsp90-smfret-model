@@ -1,0 +1,53 @@
+{
+  "title": "hsp90-smfret-model: Three-state kinetic model for single-molecule FRET data",
+  "description": "A minimal Python pipeline to process single-molecule FRET (.tracks/.h5) data and fit a three-state kinetic model (Open ↔ Intermediate ↔ Closed) with state-dependent photobleaching. Includes global multi-start optimisation, bootstrap confidence intervals, and Sobol sensitivity analysis.",
+  "upload_type": "software",
+  "access_right": "open",
+  "license": "BSD-3-Clause",
+  "language": "eng",
+  "creators": [
+    {
+      "name": "Mishra, Abhinav",
+      "affiliation": "Independent Researcher",
+      "orcid": "0009-0005-3179-7408"
+    }
+  ],
+  "keywords": [
+    "single-molecule FRET",
+    "smFRET",
+    "Hsp90",
+    "kinetic model",
+    "OIC model",
+    "master equation",
+    "bootstrap",
+    "Sobol sensitivity",
+    "biophysics",
+    "Python"
+  ],
+  "related_identifiers": [
+    {
+      "identifier": "10.5281/zenodo.17559063",
+      "relation": "isSupplementTo",
+      "resource_type": "dataset",
+      "scheme": "doi"
+    },
+    {
+      "identifier": "10.1016/j.bpj.2025.09.024",
+      "relation": "isSupplementTo",
+      "resource_type": "publication-article",
+      "scheme": "doi"
+    },
+    {
+      "identifier": "10.3791/63124",
+      "relation": "references",
+      "resource_type": "publication-article",
+      "scheme": "doi"
+    },
+    {
+      "identifier": "https://github.com/bibymaths/hsp90-smfret-model",
+      "relation": "isSupplementTo",
+      "scheme": "url"
+    }
+  ],
+  "notes": "Built with Python ≥ 3.11. Dataset (Hugel 2025, Zenodo DOI 10.5281/zenodo.17559063) must be downloaded separately before running the pipeline."
+}
