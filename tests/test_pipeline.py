@@ -143,7 +143,9 @@ def test_edge_case_identical_rates(
     assert signal.shape == t.shape
 
 
-def test_pipeline_main_entrypoint(tmp_path: Path, fret_matrix: pd.DataFrame, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pipeline_main_entrypoint(
+    tmp_path: Path, fret_matrix: pd.DataFrame, monkeypatch: pytest.MonkeyPatch
+) -> None:
     data_dir = tmp_path / "data" / "timeseries"
     data_dir.mkdir(parents=True)
 

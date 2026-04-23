@@ -93,7 +93,9 @@ def test_parse_args(monkeypatch: pytest.MonkeyPatch) -> None:
     assert args.export_dir.name == "timeseries"
 
 
-def test_main_entrypoint(tmp_data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_entrypoint(
+    tmp_data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setattr(
         "sys.argv",
         [

@@ -1660,7 +1660,9 @@ def sobol_sensitivity_3state(
     }
 
     # ---- 3. Generate samples --------------------------------
-    param_values = sobol_sample.sample(problem, N=n_base_samples, calc_second_order=True)
+    param_values = sobol_sample.sample(
+        problem, N=n_base_samples, calc_second_order=True
+    )
 
     # ---- 4. Evaluate model for each sample -------
 
