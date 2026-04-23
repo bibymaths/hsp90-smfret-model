@@ -102,9 +102,10 @@ def test_main_entrypoint(tmp_data_dir: Path, tmp_path: Path, monkeypatch: pytest
             str(tmp_data_dir),
             "--export-dir",
             str(tmp_path),
-            "--no-inspect-plots",
+            "--save-plots",
             "--keep-intermediate",
         ],
     )
     get_traces.main()
     assert (tmp_path / "fret_matrix.csv").exists()
+    assert any((tmp_data_dir / "plots").glob("*.png"))

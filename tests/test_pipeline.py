@@ -151,14 +151,123 @@ def test_pipeline_main_entrypoint(tmp_path: Path, fret_matrix: pd.DataFrame, mon
     matrix.columns = [
         f"constructA_241107_p{i:05d}" for i in range(1, matrix.shape[1] + 1)
     ]
+    matrix.insert(0, "time_s", np.linspace(0.0, matrix.shape[0] * 0.1, matrix.shape[0]))
     matrix.to_csv(data_dir / "fret_matrix.csv", index=False)
+
+    params = pipeline.Hsp90Params3State(
+        k_OI=0.2,
+        k_IO=0.15,
+        k_IC=0.3,
+        k_CI=0.25,
+        k_BO=0.02,
+        k_BI=0.03,
+        k_BC=0.04,
+        E_open=0.2,
+        E_inter=0.5,
+        E_closed=0.8,
+        P_O0=0.5,
+        P_C0=0.2,
+    )
+    fit_stub = pipeline.Hsp90Fit3State(params=params, f_dyn=0.7, E_static=0.2)
+    summary_stub = pd.DataFrame(
+        {
+            "group_key": ["constructA_241107"],
+            "k_OI": [0.2],
+            "f_dyn": [0.7],
+            "E_closed": [0.8],
+        }
+    )
+    si_stub = {
+        "names": ["k_OI", "k_IO", "f_dyn"],
+        "S1": np.array([0.2, 0.1, 0.3]),
+        "S1_conf": np.array([0.01, 0.01, 0.01]),
+        "ST": np.array([0.3, 0.2, 0.4]),
+        "ST_conf": np.array([0.01, 0.01, 0.01]),
+    }
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(pipeline, "outdir", tmp_path)
     monkeypatch.setattr(pipeline.args, "multistarts", 1)
     monkeypatch.setattr(pipeline.args, "bootstraps", 2)
     monkeypatch.setattr(pipeline.args, "cores", 1)
+    monkeypatch.setattr(pipeline, "fit_global_3state", lambda *args, **kwargs: fit_stub)
+    monkeypatch.setattr(
+        pipeline,
+        "fit_all_conditions",
+        lambda *args, **kwargs: (summary_stub.copy(), {"constructA_241107": fit_stub}),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "sobol_sensitivity_3state",
+        lambda *args, **kwargs: dict(si_stub),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "sobol_sensitivity_for_group",
+        lambda *args, **kwargs: pd.DataFrame(
+            {
+                "group_by": ["condition"],
+                "group_key": ["constructA_241107"],
+                "param": ["k_OI"],
+                "S1": [0.2],
+                "S1_conf": [0.01],
+                "ST": [0.3],
+                "ST_conf": [0.01],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "bootstrap_condition_params",
+        lambda *args, **kwargs: pd.DataFrame(
+            {
+                "k_OI": [0.2, 0.25],
+                "k_IC": [0.3, 0.28],
+                "f_dyn": [0.7, 0.72],
+                "E_closed": [0.8, 0.79],
+            }
+        ),
+    )
 
     pipeline.main()
 
     assert (tmp_path / "best_params.csv").exists()
+    assert (tmp_path / "sobol_indices.csv").exists()
+    assert (tmp_path / "bootstrap_distributions.csv").exists()
+    assert (tmp_path / "summary_conditions.csv").exists()
+
+
+def test_bootstrap_plot_and_compare_helpers(tmp_path: Path) -> None:
+    boot_summary = pd.DataFrame(
+        {
+            "group_key": ["g1", "g2"],
+            "param": ["k_OI", "k_OI"],
+            "mean": [0.2, 0.3],
+            "lo": [0.1, 0.2],
+            "hi": [0.25, 0.35],
+        }
+    )
+    pipeline.plot_bootstrap_errorbars_all_conditions(
+        boot_summary=boot_summary,
+        param="k_OI",
+        outdir=tmp_path,
+    )
+    pipeline.plot_bootstrap_errorbars_all_conditions(
+        boot_summary=boot_summary,
+        param="missing",
+        outdir=tmp_path,
+    )
+
+    boot_a = pd.DataFrame({"k_OI": [0.1, 0.2, 0.3]})
+    boot_b = pd.DataFrame({"k_OI": [0.2, 0.3, 0.4]})
+    pipeline.plot_bootstrap_compare(
+        boot_A=boot_a,
+        boot_B=boot_b,
+        param="k_OI",
+        label_A="A",
+        label_B="B",
+        outdir=tmp_path,
+    )
+
+    assert (tmp_path / "bootstrap_ci_k_OI.png").exists()
+    assert (tmp_path / "bootstrap_compare_k_OI.png").exists()
