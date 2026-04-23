@@ -1,9 +1,12 @@
-# Hsp90 Single-Molecule FRET Kinetic Modeling and Analysis Pipeline
+<p>
+  <img src="images/logo.png" width="45%" />
+  &nbsp;&nbsp;
+  <img src="images/structure.png" width="30%" />
+</p>
 
-[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
-[![License: CC BY 4.0](https://img.shields.io/badge/License-CC--BY--4.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
-[![Python >=3.10](https://img.shields.io/badge/Python-%3E%3D3.10-blue.svg)](https://www.python.org/)
-[![Scientific Computing](https://img.shields.io/badge/Scientific%20Computing-NumPy%20%7C%20SciPy%20%7C%20pandas-informational.svg)](https://scipy.org/)
+[![Code License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
+[![Figures & Plots License: CC BY 4.0](https://img.shields.io/badge/License-CC--BY--4.0-lightgrey.svg)](https://creativecommons.org/licenses/by/4.0/)
+[![Python ==3.11](https://img.shields.io/badge/Python-%3E%3D3.11-blue.svg)](https://www.python.org/)
 
 This repository provides a minimal pipeline to process **single-molecule FRET (.tracks/.h5)** data<sup>[1]</sup> and fit a  
 **three-state kinetic model** (Open ↔ Intermediate ↔ Closed) with state-dependent bleaching.
@@ -59,9 +62,13 @@ The fitted model contains:
 
 ### **State Diagram**
 
-![Model Diagram](images/img.png)
+<div align="center">
+  <img src="images/flow.png" alt="Model Diagram" width="60%"/>
+</div>
 
-#### **Model Description**
+--- 
+
+#### **Model**
 
 The full observed ensemble signal is a **mixture**:
 
@@ -91,16 +98,6 @@ P_O \\ P_I \\ P_C \\ P_B
 where \( P_O, P_I, P_C, P_B \) are the probabilities of being in Open, Intermediate, Closed, and Bleached states,
 respectively.
 
-## **Directory Structure**
-
-```
-get_traces.py     # Extract/clean trajectories
-pipeline.py       # Global fitting + bootstrap + sensitivity
-data/             # Input .tracks/.h5 files
-data/timeseries/  # Per-particle CSV + combined matrix
-results/          # Fits, plots, bootstrap, Sobol
-```
-
 ---
 
 ## **References**
@@ -117,15 +114,6 @@ e63124. [https://doi.org/10.3791/63124](https://doi.org/10.3791/63124)
 2025). *Single-molecule FRET and tracking of transfected biomolecules in living cells.* **Biophysical Journal**,
 S0006-3495(25)00604-6. Advance online
 publication. [https://doi.org/10.1016/j.bpj.2025.09.024](https://doi.org/10.1016/j.bpj.2025.09.024)
-
----
-
-## **Licensing**
-
-* **Code** → BSD-3-Clause
-* **Figures & plots** → CC-BY-4.0
-
-See `LICENSE` for details.
 
 ---
 
