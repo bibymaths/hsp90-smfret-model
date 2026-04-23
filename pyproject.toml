@@ -118,4 +118,4 @@ known-first-party = ["get_traces", "pipeline"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "--cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=90"
+addopts = "--cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=80"

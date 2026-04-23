@@ -58,6 +58,11 @@ markdown_extensions:
 extra_javascript:
   - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 
+extra_files:
+  - images/logo.png
+  - images/flow.png
+  - images/structure.png
+
 nav:
   - Home: index.md
   - Overview: overview.md
