@@ -1,27 +1,41 @@
-site_name: smFRET Kinetic Model
-site_description: Three-state OIC kinetic model for single-molecule FRET data
-repo_url: https://github.com/abhinavmishra/hsp90-smfret-model
+site_name: hsp90-smfret-model
+site_description: "Documentation for a simple alignment tool for DNA sequences."
+site_author: "Abhinav Mishra"
+site_url: https://bibymaths.github.io/hsp90-smfret-model
+use_directory_urls: false
+repo_url: https://github.com/bibymaths/hsp90-smfret-model
+repo_name: bibymaths/hsp90-smfret-model
+
 theme:
   name: material
+  language: en
+  font:
+    text: Ubuntu           # The font for standard paragraph text
+    code: Fira Code        # The font for code blocks
   palette:
-    - scheme: default
-      primary: teal
-      accent: teal
+    # Palette toggle for light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo # Change this to your brand color!
+      accent: deep purple
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
-    - scheme: slate
-      primary: teal
-      accent: teal
+
+    # Palette toggle for dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: deep purple
       toggle:
         icon: material/brightness-4
         name: Switch to light mode
   features:
     - navigation.tabs
-    - navigation.sections
-    - navigation.top
-    - content.code.annotate
-    - content.tabs.link
+    - navigation.tabs.sticky
+    - content.code.copy
+    - toc.integrate
+
 plugins:
   - search
   - autorefs
@@ -31,6 +45,7 @@ plugins:
           options:
             show_source: true
             docstring_style: numpy
+
 markdown_extensions:
   - admonition
   - pymdownx.details
@@ -39,8 +54,10 @@ markdown_extensions:
       generic: true
   - attr_list
   - md_in_html
+
 extra_javascript:
   - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
 nav:
   - Home: index.md
   - Overview: overview.md
@@ -48,3 +65,6 @@ nav:
   - Usage: usage.md
   - API Reference: api.md
   - Contributing: contributing.md
+
+copyright: >
+  Copyright &copy; 2025 <a href="https://bibymaths.github.io">Abhinav Mishra</a>.
