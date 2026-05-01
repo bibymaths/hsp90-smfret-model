@@ -2,7 +2,8 @@ name: Docs
 
 on:
   push:
-    branches: ["main"]
+    tags:
+      - 'v*.*.*'
   workflow_dispatch:
 
 permissions:
@@ -13,11 +14,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.11"
-          cache: pip
       - name: Install docs dependencies
-        run: pip install mkdocs-material mkdocstrings[python] mkdocs-autorefs
+        run: uv sync --group docs
       - name: Build & deploy to GitHub Pages
-        run: mkdocs gh-deploy --force
+        run: uv run mkdocs gh-deploy --force
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
